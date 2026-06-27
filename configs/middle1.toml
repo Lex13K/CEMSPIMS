@@ -1,0 +1,107 @@
+# Path layout: `raw` is shared across runs. `interim` / `processed` use `{run_id}` (CLI `--run`, default `default`).
+# Modeling tables (returns, targets, graphs) live under `interim`. Use `processed` for evaluation summaries and figures.
+
+[paths]
+raw = "data/raw"  # Project-relative directory for immutable inputs (CRSP extracts, membership, etc.).
+interim = "data/{run_id}/interim"  # Per-run scratch + modeling tables; `{run_id}` is substituted by the CLI run id.
+processed = "data/{run_id}/processed"  # Per-run outputs such as metrics, figures, evaluation artifacts.
+
+[graph]
+ret_col = "ret_used"  # Column name in `returns_panel.parquet` used for correlations and rolling features (string matching a column in that file).
+align_feature_dates_with_targets = true  # If true, feature-date index intersects with dates present in `targets.parquet` when building `stage04_dates` (boolean).
+show_progress = true  # If true, use tqdm bars on stderr where supported (universe, sequential edges, etc.); boolean.
+verbose = true  # If true, allow non-tqdm status lines and step messages (boolean).
+debug_progress = false  # If true, extra worker-level prints for parallel node_features (boolean); noisy.
+
+[graph.rolling_window]
+length = 63  # Rolling window length in **trading days** for universe eligibility, node features, and edge correlations (positive integer).
+min_obs_frac = 0.75  # Fraction of `length` used as `min_periods` / min observations (float in (0, 1], typically 0.6–1.0).
+
+[graph.universe]
+universe_mode = "fixed_replace"  # How the cross-section is built: `"fixed_replace"` (seed then replace) or any other value selects the **monthly_rebalance** path (e.g. `"monthly_rebalance"`).
+n_nodes = 500  # Number of stocks per feature date in the universe (positive integer).
+selection_rule = "mcap"  # Ranking rule for cross-section; `"mcap"` is implemented (market cap). Other strings may fall back to mcap ordering in SQL paths—stick to `"mcap"` unless you extend the code.
+rebalance_freq = "monthly"  # Label for rebalance cadence (string, e.g. `"monthly"`). Loaded into `GraphConfig` but **not** passed by the orchestrator yet—safe to keep for future wiring.
+n_jobs = 1  # Parallel processes for universe when `universe_mode` uses the monthly-rebalance path (`1` = sequential). Integers >= 1; higher uses more RAM/CPU.
+progress_every = 50  # When tqdm is off and `verbose` is on, print a line every N dates (positive integer).
+
+[graph.edges]
+dependence = "pearson"  # Correlation for edges: `"spearman"` (rank correlation) or any other value uses **Pearson** on returns (string).
+top_k = 15  # Each node keeps this many strongest neighbors by |correlation| (positive integer; capped by n−1 in code).
+symmetrize = true  # If true, add reverse edges and deduplicate so the graph is undirected (boolean).
+n_jobs = 2  # Parallel processes for edge construction (`1` = single process, one full returns load). Integers >= 1; each worker reloads the returns panel—prefer low values on limited RAM.
+update_every = 100  # Checkpoint `edges.parquet` and parallel chunk size cadence: save after this many **completed dates** (positive integer; must be >= 1).
+
+[graph.node_features]
+rolling_mean = true  # Compute rolling mean of `ret_col` over the window (boolean).
+rolling_vol = true  # Compute rolling volatility (std) of `ret_col` over the window (boolean).
+n_jobs = 2  # Parallel workers for node features when >1 (`1` uses a single vectorized groupby.rolling pass—usually fastest on one machine). Integers >= 1.
+progress_every = 50  # In parallel node_features, workers report progress every N dates inside a chunk (positive integer).
+
+[graph.output]
+target_column = "log_rv_fwd_30"  # Name of the supervised target column in `targets.parquet` / modeling (string); must match a column you actually build in the targets step.
+
+# Packaged training dataset: splits, train-only scaler, manifest under `interim/dataset/` (`dataset.package` pipeline).
+[dataset]
+train_end = "2014-12-31"  # Last date (inclusive) assigned to train; must be <= val_end.
+val_end = "2018-12-31"  # Last date (inclusive) for validation window (train_end < date <= val_end).
+test_end = "2024-12-31"  # Last date (inclusive) for test; dates after this are dropped from splits.
+scaler_type = "standard"  # Node-feature scaling: `"standard"` uses per-column mean and std fit on train dates only.
+feature_columns = ["rolling_mean", "rolling_vol"]  # Columns in `node_features.parquet` to scale (must exist).
+write_scaled_features = true  # If true, write `interim/dataset/node_features_scaled.parquet` and reference it in the manifest.
+# target_column = "log_rv_fwd_30"  # Optional override; if omitted, defaults to `[graph.output].target_column`.
+
+# PyG training (`model.train` pipeline). Outputs under `interim/model_train/`. Install: pip install -e ".[train]"
+[model.train]
+seed = 32  # Python, NumPy, PyTorch (and CUDA if used); included in config fingerprint.
+max_epochs = 150
+lr = 0.00002
+early_stopping_patience = 20
+hidden_channels = 256
+num_gnn_layers = 2
+model_type = "graphsage"  # "graphsage" or "gat"
+pooling = "mean"
+dataloader_num_workers = 4  # DataLoader workers (not ProcessPoolExecutor; use 0 on Windows).
+batch_size = 32  # PyG batches multiple variable-size graphs per step.
+show_progress = true
+verbose = true
+device = "auto"  # "auto", "cpu", or "cuda"
+pin_memory = false
+graph_cache_dir = ""  # Optional relative path under interim for prebuilt .pt graphs; empty = build on the fly.
+parquet_date_pushdown = true  # Use Parquet row-group filters on `date` when loading graphs (faster I/O); set false if reads return empty rows.
+loss = "mse_log"  # Training objective: mse_log | mae_log | smooth_l1_log | qlike_level (matches log-space targets).
+loss_eps = 1e-12  # Level-space clamp for qlike_level (see mss.evaluation.metrics.qlike_level).
+smooth_l1_beta = 0.5  # SmoothL1Loss beta for smooth_l1_log.
+fit_log_calibration = true
+
+# Model evaluation (`model.evaluate` pipeline). Outputs under `processed/`.
+[model.evaluate]
+splits = ["train", "val", "test"]  # Splits from `interim/dataset/splits.parquet` to score.
+batch_size = 32  # DataLoader batch size for evaluation.
+device = "auto"  # "auto", "cpu", or "cuda".
+verbose = true
+# test_metric: optional override for processed/test_loss.json scalar (default: same as [model.train].loss).
+# test_metric = "mse_log"
+# Summary sample `excl_2020`: test rows whose calendar year is not in this list (default drops 2020).
+summary_test_exclusion_years = [2020]
+# Summary sample `excl_crisis`: train rows outside this inclusive window (volatile crisis window removed).
+summary_train_crisis_excl_start = "2008-09-01"
+summary_train_crisis_excl_end = "2009-03-31"
+# Formal inference (`run_hypothesis_tests`): HAC lags default (H-1) for H=30 trading-day forward RV in `targets`.
+hypothesis_hac_max_lags = 29
+hypothesis_dm_losses = ["qlike", "mse_log"]
+enable_placebo_ablation = true
+placebo_edge_seed = 7
+# Stress window removed from **test** dates for `test_excl_stress` / `test_excl_union` (descriptive train crisis slice is separate).
+# Must **overlap your test holdout** to strip rows; if it does not (e.g. 2008–2009 vs test post-2018), formal inference emits an audit row instead of duplicating H2/H3—set dates to an episode inside test (e.g. COVID) if needed.
+summary_test_stress_excl_start = "2022-01-01"
+summary_test_stress_excl_end = "2022-10-31"
+# On stress-stripped subsamples, also run MZ (H1) — default false; H2/H3 always rerun for H4.
+hypothesis_h4_include_h1 = false
+
+# Post-train reporting: single loss figure built from training history + test loss.
+[analysis.summarize]
+verbose = true
+dpi = 150
+# Build `figures/general/hypothesis_tests_table.png` from `summaries/hypothesis_tests.csv` (requires full `model.evaluate`).
+draw_hypothesis_table = true

@@ -1,0 +1,63 @@
+# Virtual environments
+.venv/
+venv/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Test / coverage (local)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Type checker / profiler (if used)
+.dmypy.json
+dmypy.json
+*.prof
+
+# Artifacts (project-specific output root, if created)
+artifacts/
+
+# Local data: commit empty data/raw/ only; ignore every run folder (default, middle1, …)
+data/*
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+
+# Archived local development notes (not part of public release)
+docs/legacy/
+
+# Editor / IDE (machine-specific)
+.cursor/
+.idea/
+*.code-workspace
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment and secrets (never commit credentials)
+.env
+.env.*
+!.env.example
+
+# Logs and local scratch
+*.log
+*.tmp
+*.temp
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
