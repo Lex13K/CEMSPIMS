@@ -5,10 +5,44 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 
+from mss.calendar.trading_windows import TradingCalendar
 from mss.graph.progress_util import have_tqdm, maybe_tqdm
+
+
+def _read_returns_for_chunk(
+    returns_panel_path: str,
+    date_chunk: list,
+    *,
+    ret_col: str,
+    window_length: int,
+    calendar: TradingCalendar,
+) -> pd.DataFrame:
+    """Load returns for chunk dates plus each date's rolling window (not the full panel)."""
+    needed: set[pd.Timestamp] = set()
+    for d in date_chunk:
+        fd = pd.to_datetime(d).normalize()
+        needed.update(calendar.window_dates_inclusive(fd, window_length))
+    if not needed:
+        return pd.DataFrame(columns=["date", "permno", ret_col])
+    date_literals = ", ".join(
+        f"DATE '{pd.Timestamp(x).date().isoformat()}'" for x in sorted(needed)
+    )
+    pq = str(Path(returns_panel_path).resolve()).replace("\\", "/").replace("'", "''")
+    con = duckdb.connect(database=":memory:")
+    df = con.execute(
+        f"""
+        SELECT date, permno, {ret_col}
+        FROM read_parquet('{pq}')
+        WHERE date IN ({date_literals})
+        """
+    ).df()
+    con.close()
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 def compute_edges_for_date(
@@ -21,21 +55,19 @@ def compute_edges_for_date(
     dependence: str = "spearman",
     top_k: int = 10,
     symmetrize: bool = True,
+    calendar: TradingCalendar | None = None,
 ) -> pd.DataFrame:
     if len(permnos) < 2:
         return pd.DataFrame(columns=["date", "src", "dst", "weight"])
-    fd = pd.to_datetime(feature_date)
-    start = fd - pd.Timedelta(days=window_length * 2)
-    window = returns_panel[
-        (returns_panel["date"] <= fd) & (returns_panel["date"] >= start)
-    ].copy()
-    window["date"] = pd.to_datetime(window["date"])
-    uniq_dates = window["date"].drop_duplicates().sort_values(ascending=False)
-    use_dates = (
-        set(uniq_dates.iloc[:window_length])
-        if len(uniq_dates) >= window_length
-        else set(uniq_dates)
-    )
+    fd = pd.to_datetime(feature_date).normalize()
+    if calendar is None:
+        uniq = returns_panel["date"].drop_duplicates().sort_values()
+        calendar = TradingCalendar.from_sorted_dates(uniq)
+    use_dates = set(calendar.window_dates_inclusive(fd, window_length))
+    if not use_dates:
+        return pd.DataFrame(columns=["date", "src", "dst", "weight"])
+    window = returns_panel.copy()
+    window["date"] = pd.to_datetime(window["date"]).dt.normalize()
     w = window[window["date"].isin(use_dates) & window["permno"].isin(permnos)]
     w = w.dropna(subset=[ret_col])
     pivot = w.pivot_table(index="date", columns="permno", values=ret_col)
@@ -90,12 +122,25 @@ def _build_edges_chunk(
     dependence: str,
     top_k: int,
     symmetrize: bool,
+    calendar_dates: tuple[pd.Timestamp, ...],
 ) -> pd.DataFrame:
-    ret = pd.read_parquet(returns_panel_path, columns=["date", "permno", ret_col])
-    ret["date"] = pd.to_datetime(ret["date"])
+    calendar = TradingCalendar(calendar_dates)
+    ret = _read_returns_for_chunk(
+        returns_panel_path,
+        date_chunk,
+        ret_col=ret_col,
+        window_length=window_length,
+        calendar=calendar,
+    )
+    chunk_dates = {pd.to_datetime(d).normalize() for d in date_chunk}
+    universe_slice = universe_per_date[
+        pd.to_datetime(universe_per_date["date"]).dt.normalize().isin(chunk_dates)
+    ]
     rows = []
     for d in date_chunk:
-        permnos = universe_per_date[universe_per_date["date"] == d]["permno"].tolist()
+        permnos = universe_slice[pd.to_datetime(universe_slice["date"]).dt.normalize() == pd.to_datetime(d).normalize()][
+            "permno"
+        ].tolist()
         edf = compute_edges_for_date(
             ret,
             permnos,
@@ -105,6 +150,7 @@ def _build_edges_chunk(
             dependence=dependence,
             top_k=top_k,
             symmetrize=symmetrize,
+            calendar=calendar,
         )
         rows.append(edf)
     if not rows:
@@ -176,6 +222,9 @@ def build_edge_lists(
         df.to_parquet(out_path, index=False)
 
     n_dates = len(dates)
+    calendar = TradingCalendar.from_parquet_date_column(returns_panel_path)
+    calendar_dates = calendar.dates
+
     if n_jobs > 1:
         chunk_size = update_every
         chunks = [dates[i : i + chunk_size] for i in range(0, n_dates, chunk_size)]
@@ -202,12 +251,17 @@ def build_edge_lists(
                         _build_edges_chunk,
                         rp_str,
                         chunk,
-                        universe_per_date,
+                        universe_per_date[
+                            pd.to_datetime(universe_per_date["date"]).isin(
+                                [pd.to_datetime(d) for d in chunk]
+                            )
+                        ],
                         window_length=window_length,
                         ret_col=ret_col,
                         dependence=dependence,
                         top_k=top_k,
                         symmetrize=symmetrize,
+                        calendar_dates=calendar_dates,
                     ): i
                     for i, chunk in enumerate(chunks)
                 }
@@ -276,6 +330,7 @@ def build_edge_lists(
                 dependence=dependence,
                 top_k=top_k,
                 symmetrize=symmetrize,
+                calendar=calendar,
             )
             rows.append(edf)
             if since_last_checkpoint >= update_every:

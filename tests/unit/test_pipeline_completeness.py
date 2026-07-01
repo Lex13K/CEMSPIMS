@@ -10,6 +10,7 @@ import pandas as pd
 from mss.graph.config import load_graph_config
 from mss.io.config import ResolvedConfig
 from mss.pipeline import completeness as comp
+from tests.conftest import make_resolved_config
 
 
 def _cfg(tmp: Path) -> ResolvedConfig:
@@ -20,13 +21,11 @@ def _cfg(tmp: Path) -> ResolvedConfig:
         "[graph.universe]\nn_nodes = 1\n",
         encoding="utf-8",
     )
-    return ResolvedConfig(
-        run_id="t",
-        project_root=tmp,
-        raw_dir=tmp / "raw",
-        interim_dir=tmp / "interim",
-        processed_dir=tmp / "processed",
+    return make_resolved_config(
+        tmp,
         source_config_path=cfg_toml.resolve(),
+        shared_interim_dir=tmp / "shared_interim",
+        run_interim_dir=tmp / "interim",
     )
 
 
@@ -59,11 +58,13 @@ def _write_rp(path: Path) -> None:
 
 def test_edges_incomplete_when_fewer_dates_than_universe(tmp_path) -> None:
     cfg = _cfg(tmp_path)
+    shared = tmp_path / "shared_interim"
     interim = tmp_path / "interim"
     g = interim / "graphs"
+    shared.mkdir(parents=True)
     interim.mkdir(parents=True)
     g.mkdir(parents=True)
-    _write_rp(interim / "returns_panel.parquet")
+    _write_rp(shared / "returns_panel.parquet")
 
     u = pd.DataFrame(
         {
@@ -90,9 +91,9 @@ def test_edges_incomplete_when_fewer_dates_than_universe(tmp_path) -> None:
 
 def test_targets_incomplete_when_rowcount_mismatch_manifest(tmp_path) -> None:
     cfg = _cfg(tmp_path)
-    interim = tmp_path / "interim"
-    interim.mkdir(parents=True)
-    tg = interim / "targets.parquet"
+    shared = tmp_path / "shared_interim"
+    shared.mkdir(parents=True)
+    tg = shared / "targets.parquet"
     df = pd.DataFrame(
         {
             "date": [pd.Timestamp("2020-01-02")],
@@ -102,22 +103,27 @@ def test_targets_incomplete_when_rowcount_mismatch_manifest(tmp_path) -> None:
         }
     )
     df.to_parquet(tg, index=False)
-    man = interim / "targets_manifest.json"
+    man = shared / "targets_manifest.json"
     man.write_text(json.dumps({"stats": {"n_rows": 2}}), encoding="utf-8")
     assert not comp.targets_step_semantically_complete(cfg)
 
 
 def test_feature_dates_matches_expected(tmp_path) -> None:
     cfg = _cfg(tmp_path)
+    shared = tmp_path / "shared_interim"
     interim = tmp_path / "interim"
+    shared.mkdir(parents=True)
     interim.mkdir(parents=True)
-    _write_rp(interim / "returns_panel.parquet")
+    _write_rp(shared / "returns_panel.parquet")
     from mss.graph.expected import compute_expected_feature_dates
 
     expected = compute_expected_feature_dates(
-        interim / "returns_panel.parquet", load_graph_config(cfg.source_config_path), None
+        shared / "returns_panel.parquet", load_graph_config(cfg.source_config_path), None
     )
     pd.DataFrame({"date": expected}).to_parquet(interim / "stage04_dates.parquet", index=False)
+    from mss.config.fingerprints import write_graph_fingerprint_sidecar
+
+    write_graph_fingerprint_sidecar(cfg)
     assert comp.feature_dates_step_semantically_complete(cfg)
 
 
@@ -129,17 +135,17 @@ def test_expected_feature_dates_aligns_with_config(tmp_path) -> None:
         "[graph.universe]\nn_nodes = 1\n",
         encoding="utf-8",
     )
-    cfg = ResolvedConfig(
-        run_id="t",
-        project_root=tmp_path,
-        raw_dir=tmp_path / "raw",
-        interim_dir=tmp_path / "interim",
-        processed_dir=tmp_path / "processed",
+    cfg = make_resolved_config(
+        tmp_path,
         source_config_path=cfg_toml.resolve(),
+        shared_interim_dir=tmp_path / "shared_interim",
+        run_interim_dir=tmp_path / "interim",
     )
+    shared = tmp_path / "shared_interim"
     interim = tmp_path / "interim"
+    shared.mkdir(parents=True)
     interim.mkdir(parents=True)
-    _write_rp(interim / "returns_panel.parquet")
+    _write_rp(shared / "returns_panel.parquet")
     tg = pd.DataFrame(
         {
             "date": [pd.Timestamp("2020-01-03")],
@@ -148,53 +154,68 @@ def test_expected_feature_dates_aligns_with_config(tmp_path) -> None:
             "vix": [18.0],
         }
     )
-    tg.to_parquet(interim / "targets.parquet", index=False)
+    tg.to_parquet(shared / "targets.parquet", index=False)
     gc = load_graph_config(cfg.source_config_path)
     from mss.graph.expected import compute_expected_feature_dates
 
     exp = compute_expected_feature_dates(
-        interim / "returns_panel.parquet", gc, interim / "targets.parquet"
+        shared / "returns_panel.parquet", gc, shared / "targets.parquet"
     )
     assert len(exp) == 1
     pd.DataFrame({"date": exp}).to_parquet(interim / "stage04_dates.parquet", index=False)
+    from mss.config.fingerprints import write_graph_fingerprint_sidecar
+
+    write_graph_fingerprint_sidecar(cfg)
     assert comp.feature_dates_step_semantically_complete(cfg)
 
 
 def test_model_train_step_semantically_complete_delegates(tmp_path) -> None:
-    cfg_toml = tmp_path / "cfg.toml"
-    cfg_toml.write_text("", encoding="utf-8")
-    cfg = ResolvedConfig(
-        run_id="t",
-        project_root=tmp_path,
-        raw_dir=tmp_path / "raw",
-        interim_dir=tmp_path / "interim",
-        processed_dir=tmp_path / "processed",
-        source_config_path=cfg_toml.resolve(),
+    from mss.config.fingerprints import (
+        current_model_train_fingerprint,
+        write_dataset_fingerprint_sidecar,
+        write_graph_fingerprint_sidecar,
     )
+
+    cfg_toml = tmp_path / "cfg.toml"
+    cfg_toml.write_text(
+        "[graph.universe]\nn_nodes = 500\n\n"
+        "[dataset]\ntrain_end = \"2014-12-31\"\nval_end = \"2018-12-31\"\n"
+        "test_end = \"2024-12-31\"\n\n[model.train]\nseed = 42\n",
+        encoding="utf-8",
+    )
+    cfg = make_resolved_config(tmp_path, source_config_path=cfg_toml.resolve())
     assert not comp.model_train_step_semantically_complete(cfg)
     d = tmp_path / "interim" / "model_train"
     d.mkdir(parents=True)
+    fp = current_model_train_fingerprint(cfg.source_config_path)
     (d / "final_metrics.json").write_text(
-        json.dumps({"status": "completed", "best_epoch": 0, "best_val_loss": 0.5}),
+        json.dumps(
+            {
+                "status": "completed",
+                "best_epoch": 0,
+                "best_val_loss": 0.5,
+                "config_fingerprint": fp,
+            }
+        ),
         encoding="utf-8",
     )
+    write_graph_fingerprint_sidecar(cfg)
+    write_dataset_fingerprint_sidecar(cfg)
     assert comp.model_train_step_semantically_complete(cfg)
 
 
 def test_model_evaluate_step_semantically_complete_delegates(tmp_path) -> None:
     cfg_toml = tmp_path / "cfg.toml"
     cfg_toml.write_text("", encoding="utf-8")
-    cfg = ResolvedConfig(
-        run_id="t",
-        project_root=tmp_path,
-        raw_dir=tmp_path / "raw",
-        interim_dir=tmp_path / "interim",
-        processed_dir=tmp_path / "processed",
-        source_config_path=cfg_toml.resolve(),
-    )
+    cfg = make_resolved_config(tmp_path, source_config_path=cfg_toml.resolve())
     assert not comp.model_evaluate_step_semantically_complete(cfg)
     p = tmp_path / "processed"
-    p.mkdir(parents=True)
+    scoring = p / "scoring"
+    metrics_desc = p / "metrics" / "descriptive"
+    metrics_formal = p / "metrics" / "formal"
+    scoring.mkdir(parents=True)
+    metrics_desc.mkdir(parents=True)
+    metrics_formal.mkdir(parents=True)
     fc = pd.DataFrame(
         {
             "date": [pd.Timestamp("2020-01-02")],
@@ -204,7 +225,7 @@ def test_model_evaluate_step_semantically_complete_delegates(tmp_path) -> None:
             "y_pred_model": [0.2],
         }
     )
-    fc.to_parquet(p / "forecasts.parquet", index=False)
+    fc.to_parquet(scoring / "forecasts.parquet", index=False)
     import numpy as np
 
     from mss.evaluation.metrics import qlike_per_date
@@ -234,12 +255,14 @@ def test_model_evaluate_step_semantically_complete_delegates(tmp_path) -> None:
             "qlike_gnn_t": [float(qg[0])],
             "qlike_vix_t": [float(qv[0])],
             "d_qlike_t": [dg],
+            "d_qlike_placebo_t": [0.0],
             "mse_log_gnn_t": [mg],
             "mse_log_vix_t": [mv],
             "d_mse_log_t": [dm],
+            "d_mse_log_placebo_t": [0.0],
         }
-    ).to_parquet(p / "forecast_panel.parquet", index=False)
-    (p / "test_loss.json").write_text(
+    ).to_parquet(scoring / "forecast_panel.parquet", index=False)
+    (scoring / "test_loss.json").write_text(
         json.dumps(
             {
                 "status": "completed",
@@ -251,9 +274,7 @@ def test_model_evaluate_step_semantically_complete_delegates(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    summ = p / "summaries"
-    summ.mkdir(parents=True, exist_ok=True)
-    (summ / "summary_table.csv").write_text(
+    (metrics_desc / "summary_table.csv").write_text(
         "model,sample,mse_log,mae_log,mse,mae,qlike,n_samples\n"
         "gnn,full_test,0.01,0.02,1.0,1.1,1.2,10\n"
         "vix,full_test,0.02,0.03,1.1,1.2,1.3,10\n",
@@ -267,9 +288,10 @@ def test_model_evaluate_step_semantically_complete_delegates(tmp_path) -> None:
                 "statistic_type": "hac_t_mean",
                 "null_hypothesis": "x",
                 "alternative": "y",
-                "test_name": "diebold_mariano_mean_loss_diff",
-                "sample": "test",
-                "coefficient_tested": "",
+                    "test_name": "diebold_mariano_mean_loss_diff",
+                    "sample": "test",
+                    "benchmark": "raw_vix",
+                    "coefficient_tested": "",
                 "test_scope": "mean_loss_difference",
                 "joint_hypothesis": "none",
                 "tail": "upper",
@@ -292,7 +314,26 @@ def test_model_evaluate_step_semantically_complete_delegates(tmp_path) -> None:
                 "notes": "fixture",
             }
         ]
-    ).to_csv(summ / "hypothesis_tests.csv", index=False)
+    ).to_csv(metrics_formal / "hypothesis_tests.csv", index=False)
+    from mss.config.fingerprints import (
+        current_model_train_fingerprint,
+        write_evaluate_fingerprint_sidecar,
+    )
+
+    d = tmp_path / "interim" / "model_train"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "final_metrics.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "best_epoch": 1,
+                "best_val_loss": 0.1,
+                "config_fingerprint": current_model_train_fingerprint(cfg.source_config_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_evaluate_fingerprint_sidecar(cfg)
     assert comp.model_evaluate_step_semantically_complete(cfg)
 
 
@@ -302,14 +343,7 @@ def test_analysis_summarize_loss_figure_semantically_complete(tmp_path) -> None:
         '[model.evaluate]\nsplits = ["train", "val", "test"]\n\n[analysis.summarize]\ndpi = 100\n',
         encoding="utf-8",
     )
-    cfg = ResolvedConfig(
-        run_id="t",
-        project_root=tmp_path,
-        raw_dir=tmp_path / "raw",
-        interim_dir=tmp_path / "interim",
-        processed_dir=tmp_path / "processed",
-        source_config_path=cfg_toml.resolve(),
-    )
+    cfg = make_resolved_config(tmp_path, source_config_path=cfg_toml.resolve())
     assert not comp.analysis_summarize_loss_figure_semantically_complete(cfg)
     from mss.analysis.figures import expected_paths_for_summarize
 
@@ -317,3 +351,49 @@ def test_analysis_summarize_loss_figure_semantically_complete(tmp_path) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(b"x")
     assert comp.analysis_summarize_loss_figure_semantically_complete(cfg)
+
+
+def test_graph_steps_incomplete_when_n_nodes_changes_but_dates_match(tmp_path) -> None:
+    from mss.config.fingerprints import write_graph_fingerprint_sidecar
+
+    cfg = _cfg(tmp_path)
+    shared = tmp_path / "shared_interim"
+    interim = tmp_path / "interim"
+    g = interim / "graphs"
+    shared.mkdir(parents=True)
+    interim.mkdir(parents=True)
+    g.mkdir(parents=True)
+    _write_rp(shared / "returns_panel.parquet")
+    dates = [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")]
+    pd.DataFrame({"date": dates}).to_parquet(interim / "stage04_dates.parquet", index=False)
+    u = pd.DataFrame(
+        {
+            "date": dates,
+            "permno": [1, 1],
+            "rank": [1, 1],
+            "mcap": [100.0, 100.0],
+        }
+    )
+    u.to_parquet(g / "universe.parquet", index=False)
+    nf = u.assign(rolling_mean=0.01, rolling_vol=0.02)
+    nf.to_parquet(g / "node_features.parquet", index=False)
+    e = pd.DataFrame(
+        {
+            "date": dates,
+            "src": [1, 1],
+            "dst": [2, 2],
+            "weight": [0.5, 0.5],
+        }
+    )
+    e.to_parquet(g / "edges.parquet", index=False)
+    write_graph_fingerprint_sidecar(cfg)
+    assert comp.universe_step_semantically_complete(cfg)
+
+    cfg.source_config_path.write_text(
+        "[graph]\nret_col = \"ret_used\"\nalign_feature_dates_with_targets = false\n\n"
+        "[graph.rolling_window]\nlength = 1\nmin_obs_frac = 1.0\n\n"
+        "[graph.universe]\nn_nodes = 2\n",
+        encoding="utf-8",
+    )
+    assert comp.universe_step_semantic_only(cfg)
+    assert not comp.universe_step_semantically_complete(cfg)

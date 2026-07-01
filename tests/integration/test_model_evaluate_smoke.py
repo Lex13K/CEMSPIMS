@@ -26,7 +26,7 @@ def _write_packaged_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
     targets = pd.DataFrame(
         {
             "date": [d_train, d_val, d_test],
-            "log_rv_fwd_30": [0.10, 0.20, 0.30],
+            "log_rv_fwd_30cal": [0.10, 0.20, 0.30],
             "vix": [18.0, 19.0, 20.0],
         }
     )
@@ -86,7 +86,7 @@ def _write_packaged_dataset(tmp_path: Path) -> tuple[Path, Path, Path]:
         "universe_path": str(universe_path.resolve()),
         "scaler_path": str(scaler_path.resolve()),
         "targets_path": str(targets_path.resolve()),
-        "target_column": "log_rv_fwd_30",
+        "target_column": "log_rv_fwd_30cal",
         "feature_columns": ["rolling_mean", "rolling_vol"],
         "scale_target": False,
     }
@@ -134,37 +134,35 @@ def test_model_evaluate_pipeline_writes_outputs(tmp_path: Path) -> None:
         ]
     )
     assert code == 0
-    f = processed / "forecasts.parquet"
-    t = processed / "test_loss.json"
+    f = processed / "scoring" / "forecasts.parquet"
+    t = processed / "scoring" / "test_loss.json"
     figdir = processed / "figures"
-    fv = figdir / "target_vs_model_vix"
-    lv = figdir / "loss_over_epochs"
     assert f.is_file()
     assert t.is_file()
-    assert (lv / "loss_over_epochs_with_test_line_linear.png").is_file()
-    assert (lv / "loss_over_epochs_with_test_line_log.png").is_file()
-    assert (fv / "target_vs_model_vix_all_splits.png").is_file()
-    assert (fv / "target_vs_model_vix_train.png").is_file()
-    assert (fv / "target_vs_model_vix_val.png").is_file()
-    assert (fv / "target_vs_model_vix_test.png").is_file()
-    assert (processed / "summaries" / "summary_table.csv").is_file()
-    assert (processed / "summaries" / "diagnostics_smoothing.csv").is_file()
-    assert (processed / "forecast_panel.parquet").is_file()
-    assert (processed / "summaries" / "hypothesis_tests.csv").is_file()
-    assert (processed / "summaries" / "regression_mz_gnn.csv").is_file()
-    assert (processed / "summaries" / "regression_incremental.csv").is_file()
-    assert (figdir / "general" / "summary_barplot.png").is_file()
+    assert (figdir / "diagnostics" / "loss_over_epochs_linear.png").is_file()
+    assert (figdir / "diagnostics" / "loss_over_epochs_log.png").is_file()
+    assert (figdir / "by_split" / "all" / "forecast_vs_benchmarks.png").is_file()
+    assert (figdir / "by_split" / "train" / "forecast_vs_benchmarks.png").is_file()
+    assert (figdir / "by_split" / "val" / "forecast_vs_benchmarks.png").is_file()
+    assert (figdir / "by_split" / "test" / "forecast_vs_benchmarks.png").is_file()
+    assert (processed / "metrics" / "descriptive" / "summary_table.csv").is_file()
+    assert (processed / "metrics" / "descriptive" / "diagnostics_smoothing.csv").is_file()
+    assert (processed / "scoring" / "forecast_panel.parquet").is_file()
+    assert (processed / "metrics" / "formal" / "hypothesis_tests.csv").is_file()
+    assert (processed / "metrics" / "formal" / "regression_mz_gnn.csv").is_file()
+    assert (processed / "metrics" / "formal" / "regression_incremental.csv").is_file()
+    assert (figdir / "diagnostics" / "summary_barplot.png").is_file()
 
-    uc = figdir / "universe_churn"
+    uc = figdir / "diagnostics" / "universe_churn"
     assert (uc / "universe_turnover_timeseries.png").is_file()
     assert (uc / "universe_rankbucket_replacement_heatmap.png").is_file()
     assert (uc / "universe_tenure_distribution.png").is_file()
 
-    summ = processed / "summaries"
-    assert (summ / "universe_turnover_timeseries.csv").is_file()
-    assert (summ / "universe_rankbucket_replacement_long.csv").is_file()
-    assert (summ / "universe_tenure_distribution.csv").is_file()
-    assert (summ / "universe_churn_summary.csv").is_file()
+    univ = processed / "metrics" / "universe"
+    assert (univ / "universe_turnover_timeseries.csv").is_file()
+    assert (univ / "universe_rankbucket_replacement_long.csv").is_file()
+    assert (univ / "universe_tenure_distribution.csv").is_file()
+    assert (univ / "universe_churn_summary.csv").is_file()
     df = pd.read_parquet(f)
     assert {"date", "split", "sample", "y_true", "y_pred_model", "y_pred_placebo"}.issubset(
         df.columns

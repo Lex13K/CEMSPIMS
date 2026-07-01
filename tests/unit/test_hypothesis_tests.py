@@ -5,10 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+import dataclasses
+
 from mss.evaluation.config import ModelEvaluateConfig
 from mss.evaluation.hypothesis_tests import (
     PROC_AUDIT,
     PROC_DM,
+    PROC_INC_BENCH,
     PROC_MZ,
     build_formal_subsample_specs,
     run_hypothesis_tests,
@@ -27,11 +30,15 @@ def _panel_n_test_dates(*, n: int = 12) -> pd.DataFrame:
     y_level = np.exp(yt)
     pml = np.exp(pm)
     qg = qlike_per_date(y_level, pml, eps=1e-12)
+    qp = qlike_per_date(y_level, pml * 1.05, eps=1e-12)
     qv = qlike_per_date(y_level, vix_level, eps=1e-12)
     d_qlike = qv - qg
+    d_qlike_placebo = qp - qg
     mse_g = (yt - pm) ** 2
+    mse_p = (yt - (pm + 0.01)) ** 2
     mse_v = (yt - pv) ** 2
     d_mse = mse_v - mse_g
+    d_mse_placebo = mse_p - mse_g
     return pd.DataFrame(
         {
             "date": dates,
@@ -41,15 +48,21 @@ def _panel_n_test_dates(*, n: int = 12) -> pd.DataFrame:
             "y_true_level": y_level,
             "y_pred_model_log": pm,
             "y_pred_model_level": pml,
+            "y_pred_placebo_log": pm + 0.01,
+            "y_pred_placebo_level": pml * 1.05,
             "y_pred_vix_log": pv,
             "y_pred_vix_level": vix_level.astype(float),
             "vix": vix_level.astype(float),
             "qlike_gnn_t": qg,
+            "qlike_placebo_t": qp,
             "qlike_vix_t": qv,
             "d_qlike_t": d_qlike,
+            "d_qlike_placebo_t": d_qlike_placebo,
             "mse_log_gnn_t": mse_g,
+            "mse_log_placebo_t": mse_p,
             "mse_log_vix_t": mse_v,
             "d_mse_log_t": d_mse,
+            "d_mse_log_placebo_t": d_mse_placebo,
         }
     )
 
@@ -68,8 +81,16 @@ def _default_ecfg(dm_losses: tuple[str, ...] = ("qlike",)) -> ModelEvaluateConfi
         hypothesis_dm_losses=dm_losses,
         summary_test_stress_excl_start="2008-09-01",
         summary_test_stress_excl_end="2009-03-31",
+        hypothesis_stress_preset="rate_shock_2022",
+        stress_preset_active="",
         hypothesis_h4_include_h1=False,
-        apply_log_calibration=True,
+        apply_log_calibration=False,
+        apply_log_calibration_placebo=False,
+        enable_placebo_ablation=True,
+        placebo_edge_seed=7,
+        placebo_edge_mode="zero_attr",
+        fit_vix_log_calibration=False,
+        hypothesis_dm_losses_vs_placebo=("qlike", "mse_log"),
     )
 
 
@@ -111,6 +132,55 @@ def test_hypothesis_test_rows_primary_test_h1_h3_two_sided_h2_one_sided_primary(
     )
     assert h2_m["loss_name"] == "mse_log"
     assert h2_m["p_value_primary"] == h2_m["p_value_one_sided_upper"]
+
+
+def test_generalized_benchmark_rows_use_benchmark_field_not_beyond_vix() -> None:
+    """Secondary benchmarks produce H2_benchmark (DM) and incremental_vs_benchmark rows."""
+    panel = _panel_n_test_dates(n=14)
+    # Add a HAR benchmark column set so the generalized rows can run.
+    yt = panel["y_true_log"].to_numpy()
+    panel["y_pred_har_log"] = yt + 0.03
+    panel["qlike_har_t"] = panel["qlike_vix_t"].to_numpy()
+    panel["mse_log_har_t"] = (yt - (yt + 0.03)) ** 2
+    panel["d_qlike_har_t"] = panel["qlike_har_t"].to_numpy() - panel["qlike_gnn_t"].to_numpy()
+    panel["d_mse_log_har_t"] = panel["mse_log_har_t"].to_numpy() - panel["mse_log_gnn_t"].to_numpy()
+
+    ecfg = dataclasses.replace(
+        _default_ecfg(dm_losses=("qlike",)),
+        hypothesis_dm_benchmarks=("har",),
+        hypothesis_incremental_benchmarks=("har",),
+    )
+    hrows, _, _ = run_hypothesis_tests(panel, ecfg, hac_max_lags=5)
+
+    dm_bench = [r for r in hrows if r["hypothesis_id"] == "H2_benchmark" and r["sample"] == "test"]
+    assert dm_bench and all(r["benchmark"] == "har" for r in dm_bench)
+    assert all(r["inference_procedure"] == PROC_DM for r in dm_bench)
+
+    inc_bench = [r for r in hrows if r["inference_procedure"] == PROC_INC_BENCH]
+    assert inc_bench and all(r["benchmark"] == "har" for r in inc_bench)
+    # Wording must not claim "beyond VIX" for non-VIX benchmarks.
+    for r in inc_bench:
+        assert "beyond" not in str(r["null_hypothesis"]).lower()
+        assert "har" in str(r["null_hypothesis"]).lower()
+
+    # Canonical raw_vix rows keep benchmark=raw_vix.
+    h2 = next(r for r in hrows if r["hypothesis_id"] == "H2" and r["sample"] == "test")
+    assert h2["benchmark"] == "raw_vix"
+
+
+def test_h5_primary_test_dm_vs_placebo() -> None:
+    panel = _panel_n_test_dates(n=12)
+    ecfg = _default_ecfg(dm_losses=("qlike", "mse_log"))
+    hrows, _, _ = run_hypothesis_tests(panel, ecfg, hac_max_lags=ecfg.hypothesis_hac_max_lags)
+    h5 = [r for r in hrows if r.get("hypothesis_id") == "H5" and r["sample"] == "test"]
+    assert len(h5) == 2
+    losses = {r["loss_name"] for r in h5}
+    assert losses == {"qlike", "mse_log"}
+    for r in h5:
+        assert r["inference_procedure"] == PROC_DM
+        assert r["tail"] == "upper"
+        assert r["better_model"] == "gnn"
+        assert np.isfinite(r["p_value_primary"])
 
 
 def test_h2_row_self_describing_without_other_rows() -> None:

@@ -6,6 +6,7 @@ venv/
 build/
 dist/
 *.egg-info/
+app/web/node_modules/
 
 # Python cache
 __pycache__/
@@ -30,14 +31,16 @@ dmypy.json
 # Artifacts (project-specific output root, if created)
 artifacts/
 
-# Local data: commit empty data/raw/ only; ignore every run folder (default, middle1, …)
+# Local data: shared root + per-run outputs (gitignored except structure markers)
 data/*
-!data/raw/
-data/raw/*
-!data/raw/.gitkeep
-
-# Archived local development notes (not part of public release)
-docs/legacy/
+!data/shared/
+data/shared/**
+!data/shared/raw/
+data/shared/raw/*
+!data/shared/raw/.gitkeep
+!data/shared/interim/
+data/shared/interim/**
+!data/shared/interim/.gitkeep
 
 # Editor / IDE (machine-specific)
 .cursor/

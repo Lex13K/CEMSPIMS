@@ -32,8 +32,25 @@ from mss.evaluation.checks import (
     hypothesis_tests_path,
     summary_table_path,
     test_loss_path,
-    SUMMARIES_DIR,
 )
+from mss.processed.paths import (
+    FORECAST_VS_BENCHMARKS,
+    figures_universe_churn_dir,
+    forecast_comparison_path,
+    hypothesis_table_figure_path,
+    loss_figure_path_linear,
+    loss_figure_path_log,
+    metrics_universe_dir,
+    summary_barplot_path,
+    universe_churn_summary_csv_path,
+    universe_rankbucket_replacement_heatmap_path,
+    universe_rankbucket_replacement_long_csv_path,
+    universe_tenure_distribution_csv_path,
+    universe_tenure_distribution_path,
+    universe_turnover_timeseries_csv_path,
+    universe_turnover_timeseries_path,
+)
+from mss.processed.readmes import ensure_processed_readmes
 
 from mss.evaluation.forecasts_targets import merge_forecasts_with_vix
 
@@ -42,41 +59,6 @@ from mss.evaluation.config import load_model_evaluate_config
 from mss.io.config import ResolvedConfig
 
 from mss.model_train.checks import training_state_path
-
-
-
-
-
-FIGURES_ROOT = "figures"
-
-FORECAST_SUBDIR = "target_vs_model_vix"
-
-LOSS_SUBDIR = "loss_over_epochs"
-
-GENERAL_SUBDIR = "general"
-
-SUMMARY_BARPLOT = "summary_barplot.png"
-
-HYPOTHESIS_TABLE_PNG = "hypothesis_tests_table.png"
-
-UNIVERSE_CHURN_SUBDIR = "universe_churn"
-UNIVERSE_TURNOVER_TIMESERIES_PNG = "universe_turnover_timeseries.png"
-UNIVERSE_RANKBUCKET_REPLACEMENT_HEATMAP_PNG = "universe_rankbucket_replacement_heatmap.png"
-UNIVERSE_TENURE_DISTRIBUTION_PNG = "universe_tenure_distribution.png"
-
-UNIVERSE_TURNOVER_TIMESERIES_CSV = "universe_turnover_timeseries.csv"
-UNIVERSE_RANKBUCKET_REPLACEMENT_LONG_CSV = "universe_rankbucket_replacement_long.csv"
-UNIVERSE_TENURE_DISTRIBUTION_CSV = "universe_tenure_distribution.csv"
-UNIVERSE_CHURN_SUMMARY_CSV = "universe_churn_summary.csv"
-
-
-
-FORECAST_FIG_ALL = "target_vs_model_vix_all_splits.png"
-
-LOSS_FIG_LINEAR = "loss_over_epochs_with_test_line_linear.png"
-
-LOSS_FIG_LOG = "loss_over_epochs_with_test_line_log.png"
-
 
 
 _FORECAST_Y_COLS = ["y_true", "y_pred_model", "y_pred_vix"]
@@ -105,117 +87,13 @@ _FORECAST_LABELS = {
 
 
 
-def forecast_figures_dir(processed_dir: Path) -> Path:
-
-    return processed_dir / FIGURES_ROOT / FORECAST_SUBDIR
-
-
-
-
-
-def loss_figures_dir(processed_dir: Path) -> Path:
-
-    return processed_dir / FIGURES_ROOT / LOSS_SUBDIR
-
-
-
-
-
-def general_figures_dir(processed_dir: Path) -> Path:
-
-    return processed_dir / FIGURES_ROOT / GENERAL_SUBDIR
-
-
-
-
-
-def summary_barplot_path(processed_dir: Path) -> Path:
-
-    return general_figures_dir(processed_dir) / SUMMARY_BARPLOT
-
-
-def hypothesis_table_figure_path(processed_dir: Path) -> Path:
-
-    return general_figures_dir(processed_dir) / HYPOTHESIS_TABLE_PNG
-
-
-def universe_churn_figures_dir(processed_dir: Path) -> Path:
-
-    return processed_dir / FIGURES_ROOT / UNIVERSE_CHURN_SUBDIR
-
-
-def universe_turnover_timeseries_path(processed_dir: Path) -> Path:
-
-    return universe_churn_figures_dir(processed_dir) / UNIVERSE_TURNOVER_TIMESERIES_PNG
-
-
-def universe_rankbucket_replacement_heatmap_path(processed_dir: Path) -> Path:
-
-    return universe_churn_figures_dir(processed_dir) / UNIVERSE_RANKBUCKET_REPLACEMENT_HEATMAP_PNG
-
-
-def universe_tenure_distribution_path(processed_dir: Path) -> Path:
-
-    return universe_churn_figures_dir(processed_dir) / UNIVERSE_TENURE_DISTRIBUTION_PNG
-
-
-def summaries_dir(processed_dir: Path) -> Path:
-    return processed_dir / SUMMARIES_DIR
-
-
-def universe_turnover_timeseries_csv_path(processed_dir: Path) -> Path:
-    return summaries_dir(processed_dir) / UNIVERSE_TURNOVER_TIMESERIES_CSV
-
-
-def universe_rankbucket_replacement_long_csv_path(processed_dir: Path) -> Path:
-    return summaries_dir(processed_dir) / UNIVERSE_RANKBUCKET_REPLACEMENT_LONG_CSV
-
-
-def universe_tenure_distribution_csv_path(processed_dir: Path) -> Path:
-    return summaries_dir(processed_dir) / UNIVERSE_TENURE_DISTRIBUTION_CSV
-
-
-def universe_churn_summary_csv_path(processed_dir: Path) -> Path:
-    return summaries_dir(processed_dir) / UNIVERSE_CHURN_SUMMARY_CSV
-
-
-
-
-def forecast_comparison_path(processed_dir: Path, split_suffix: str) -> Path:
-
-    return forecast_figures_dir(processed_dir) / f"target_vs_model_vix_{split_suffix}.png"
-
-
-
-
-
-def loss_figure_path_linear(processed_dir: Path) -> Path:
-
-    return loss_figures_dir(processed_dir) / LOSS_FIG_LINEAR
-
-
-
-
-
-def loss_figure_path_log(processed_dir: Path) -> Path:
-
-    return loss_figures_dir(processed_dir) / LOSS_FIG_LOG
-
-
-
-
-
 def expected_paths_for_summarize(cfg: ResolvedConfig) -> list[Path]:
 
     """Artifacts produced by analysis.summarize for this config (completeness / resume)."""
 
     proc = Path(cfg.processed_dir)
 
-    fv = forecast_figures_dir(proc)
-
-    lv = loss_figures_dir(proc)
-
-    paths: list[Path] = [fv / FORECAST_FIG_ALL]
+    paths: list[Path] = [forecast_comparison_path(proc, "all")]
 
     me = load_model_evaluate_config(cfg.source_config_path)
 
@@ -223,11 +101,11 @@ def expected_paths_for_summarize(cfg: ResolvedConfig) -> list[Path]:
 
         if sp in ("train", "val", "test"):
 
-            paths.append(fv / f"target_vs_model_vix_{sp}.png")
+            paths.append(forecast_comparison_path(proc, sp))
 
-    paths.append(lv / LOSS_FIG_LINEAR)
+    paths.append(loss_figure_path_linear(proc))
 
-    paths.append(lv / LOSS_FIG_LOG)
+    paths.append(loss_figure_path_log(proc))
 
     paths.append(summary_barplot_path(proc))
 
@@ -327,8 +205,7 @@ def run_build_forecast_comparison_figures(cfg: ResolvedConfig, *, overwrite: boo
     """Time-series plots: target vs model vs log(VIX) for all splits and per configured split."""
 
     processed = Path(cfg.processed_dir)
-
-    figs = forecast_figures_dir(processed)
+    ensure_processed_readmes(processed)
 
     fcfg = load_analysis_summarize_config(cfg.source_config_path)
 
@@ -340,7 +217,7 @@ def run_build_forecast_comparison_figures(cfg: ResolvedConfig, *, overwrite: boo
 
 
 
-    out_all = figs / FORECAST_FIG_ALL
+    out_all = forecast_comparison_path(processed, "all")
 
     if not _skip_output(out_all, overwrite=overwrite):
 
@@ -534,7 +411,7 @@ def run_build_loss_figure(cfg: ResolvedConfig, *, overwrite: bool) -> None:
 
 def run_build_summary_barplot(cfg: ResolvedConfig, *, overwrite: bool) -> None:
 
-    """Grouped bar chart from processed/summaries/summary_table.csv."""
+    """Grouped bar chart from processed/metrics/descriptive/summary_table.csv."""
 
     processed = Path(cfg.processed_dir)
 
@@ -580,7 +457,7 @@ def run_build_hypothesis_table_figure(cfg: ResolvedConfig, *, overwrite: bool) -
 
         raise FileNotFoundError(
 
-            "analysis.summarize hypothesis table needs processed/summaries/hypothesis_tests.csv "
+            "analysis.summarize hypothesis table needs processed/metrics/formal/hypothesis_tests.csv "
 
             "(run model.evaluate run_hypothesis_tests)."
 
@@ -675,15 +552,45 @@ def run_build_hypothesis_table_figure(cfg: ResolvedConfig, *, overwrite: bool) -
     plt.close(fig)
 
 
-def _assert_fixed_replace_universe_mode(cfg: ResolvedConfig) -> None:
+def _compute_month_boundary_turnover(
+    universe_df: pd.DataFrame, feature_dates: list[pd.Timestamp]
+) -> pd.DataFrame:
+    """Turnover on the first feature date of each calendar month vs prior month's last date."""
+    permnos_by_date = {pd.Timestamp(d): set(g["permno"].unique()) for d, g in universe_df.groupby("date")}
+    rows: list[dict[str, float | int | pd.Timestamp | str]] = []
+    for i in range(1, len(feature_dates)):
+        t_cur = feature_dates[i]
+        t_prev = feature_dates[i - 1]
+        if t_cur.year == t_prev.year and t_cur.month == t_prev.month:
+            continue
+        prev_set = permnos_by_date.get(t_prev, set())
+        cur_set = permnos_by_date.get(t_cur, set())
+        universe_size = len(cur_set)
+        replaced_count = len(cur_set - prev_set)
+        turnover_rate = float(replaced_count) / universe_size if universe_size > 0 else float("nan")
+        rows.append(
+            {
+                "date": t_cur,
+                "month": f"{t_cur.year:04d}-{t_cur.month:02d}",
+                "universe_size": universe_size,
+                "replaced_count": replaced_count,
+                "turnover_rate": turnover_rate,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _assert_supported_universe_churn_mode(cfg: ResolvedConfig) -> str:
     from mss.graph.config import load_graph_config
 
     gc = load_graph_config(cfg.source_config_path)
-    if gc.universe_mode != "fixed_replace":
+    mode = gc.universe_mode
+    if mode not in ("fixed_replace", "monthly_rebalance"):
         raise ValueError(
-            "Universe churn figures are validated for universe_mode='fixed_replace' only "
-            f"(got universe_mode={gc.universe_mode!r})."
+            f"Universe churn figures support universe_mode in ('fixed_replace', 'monthly_rebalance'); "
+            f"got {mode!r}."
         )
+    return mode
 
 
 def _load_universe_for_churn(universe_path: Path) -> tuple[pd.DataFrame, list[pd.Timestamp]]:
@@ -809,8 +716,7 @@ def _compute_tenure_streak_lengths(universe_df: pd.DataFrame, feature_dates: lis
 
 def run_build_universe_churn_figures(cfg: ResolvedConfig, *, overwrite: bool) -> None:
     """Universe replacement diagnostics from `interim/graphs/universe.parquet`."""
-    # Guard first to avoid generating misleading plots for other universe construction modes.
-    _assert_fixed_replace_universe_mode(cfg)
+    universe_mode = _assert_supported_universe_churn_mode(cfg)
 
     fcfg = load_analysis_summarize_config(cfg.source_config_path)
 
@@ -847,7 +753,7 @@ def run_build_universe_churn_figures(cfg: ResolvedConfig, *, overwrite: bool) ->
         raise ValueError("universe_churn: no tenure streaks produced from universe data")
 
     # --- CSV outputs (numeric summaries) ---
-    summaries_dir(processed).mkdir(parents=True, exist_ok=True)
+    metrics_universe_dir(processed).mkdir(parents=True, exist_ok=True)
 
     if not _skip_output(out_turnover_csv, overwrite=overwrite):
         turnover_df.to_csv(out_turnover_csv, index=False)
@@ -880,7 +786,7 @@ def run_build_universe_churn_figures(cfg: ResolvedConfig, *, overwrite: bool) ->
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    out_dir = universe_churn_figures_dir(processed)
+    out_dir = figures_universe_churn_dir(processed)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) Turnover timeseries
@@ -1018,6 +924,7 @@ def run_build_universe_churn_figures(cfg: ResolvedConfig, *, overwrite: bool) ->
         summary_row = {
             "run_id": cfg.run_id,
             "universe_mode": gc.universe_mode,
+            "rebalance_freq": gc.rebalance_freq,
             "n_feature_dates": int(len(feature_dates)),
             "n_transitions": int(max(0, len(feature_dates) - 1)),
             "avg_universe_size": float(sizes_by_date["universe_size"].mean()) if len(sizes_by_date) else float("nan"),
@@ -1043,6 +950,21 @@ def run_build_universe_churn_figures(cfg: ResolvedConfig, *, overwrite: bool) ->
             "rankbucket_replacement_p95": _q(heat_vals, 0.95),
             "rankbucket_replacement_max": float(np.nanmax(heat_vals)) if np.isfinite(heat_vals).any() else float("nan"),
         }
+        if universe_mode == "monthly_rebalance":
+            month_df = _compute_month_boundary_turnover(universe_df, feature_dates)
+            if not month_df.empty:
+                mb = month_df["turnover_rate"].to_numpy(dtype=float)
+                summary_row["month_boundary_turnover_mean"] = float(np.nanmean(mb))
+                summary_row["month_boundary_turnover_median"] = float(np.nanmedian(mb))
+                summary_row["month_boundary_turnover_max"] = (
+                    float(np.nanmax(mb)) if np.isfinite(mb).any() else float("nan")
+                )
+                summary_row["n_month_boundaries"] = int(len(month_df))
+            else:
+                summary_row["month_boundary_turnover_mean"] = float("nan")
+                summary_row["month_boundary_turnover_median"] = float("nan")
+                summary_row["month_boundary_turnover_max"] = float("nan")
+                summary_row["n_month_boundaries"] = 0
         pd.DataFrame([summary_row]).to_csv(out_summary_csv, index=False)
 
 

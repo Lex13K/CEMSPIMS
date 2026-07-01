@@ -203,6 +203,137 @@ def evaluate_epoch(
     return total_loss / n if n else 0.0
 
 
+PLACEBO_CHECKPOINT_FILENAME = "checkpoint_placebo.pt"
+PLACEBO_FINAL_METRICS_FILENAME = "final_metrics_placebo.json"
+
+
+def placebo_checkpoint_path(cfg: ResolvedConfig) -> Path:
+    return model_train_dir(cfg) / PLACEBO_CHECKPOINT_FILENAME
+
+
+def placebo_final_metrics_path(cfg: ResolvedConfig) -> Path:
+    return model_train_dir(cfg) / PLACEBO_FINAL_METRICS_FILENAME
+
+
+def run_placebo_retrain(cfg: ResolvedConfig, *, overwrite: bool) -> None:
+    """Train a second model on placebo (zeroed/permuted) graphs for the H5 retrained-placebo arm.
+
+    Optional and off by default. Uses the same architecture and hyperparameters as the real model,
+    but on placebo graphs, and writes ``checkpoint_placebo.pt`` (best weights) + a small metrics file.
+    """
+    _require_train_stack()
+    from torch_geometric.loader import DataLoader
+
+    from mss.evaluation.config import load_model_evaluate_config
+
+    ecfg = load_model_evaluate_config(cfg.source_config_path)
+    if not ecfg.placebo_retrain:
+        return
+
+    out_dir = model_train_dir(cfg)
+    ck_placebo = placebo_checkpoint_path(cfg)
+    fm_placebo = placebo_final_metrics_path(cfg)
+    if not overwrite and ck_placebo.is_file() and fm_placebo.is_file():
+        return
+
+    interim = Path(cfg.interim_dir)
+    manifest_path = interim / "dataset" / "manifest.json"
+    manifest = load_dataset_manifest(manifest_path)
+    mcfg = load_model_train_config(cfg.source_config_path)
+    device = get_device(mcfg.device)
+
+    seed = mcfg.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    def _placebo_ds(split: str) -> GraphDateDataset:
+        return GraphDateDataset(
+            manifest,
+            split,
+            cache_dir=None,
+            use_parquet_pushdown=mcfg.parquet_date_pushdown,
+            edge_mode="placebo_permute",
+            edge_placebo_seed=ecfg.placebo_edge_seed,
+            placebo_edge_mode=ecfg.placebo_edge_mode,
+        )
+
+    train_ds = _placebo_ds("train")
+    val_ds = _placebo_ds("val")
+    if len(train_ds) == 0 or len(val_ds) == 0:
+        raise ValueError("placebo_retrain: train/val split has no dates with valid labels.")
+
+    in_channels = int(train_ds[0].x.shape[1])
+    train_loader = DataLoader(train_ds, batch_size=mcfg.batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=mcfg.batch_size, shuffle=False)
+
+    model = build_model(
+        mcfg.model_type,
+        in_channels,
+        mcfg.hidden_channels,
+        mcfg.num_gnn_layers,
+        mcfg.pooling,
+        use_edge_weights=mcfg.use_edge_weights,
+        gat_num_heads=mcfg.gat_num_heads,
+    ).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=mcfg.lr)
+    loss_fn = build_training_loss(mcfg)
+
+    best_val = float("inf")
+    best_epoch = 0
+    patience_counter = 0
+    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    metrics_list: list[dict[str, Any]] = []
+
+    for epoch in range(1, mcfg.max_epochs + 1):
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, loss_fn, device, show_progress=mcfg.show_progress
+        )
+        val_loss = evaluate_epoch(model, val_loader, loss_fn, device)
+        metrics_list.append(
+            {"epoch": epoch, "train_loss": float(train_loss), "val_loss": float(val_loss)}
+        )
+        if val_loss < best_val:
+            best_val = val_loss
+            best_epoch = epoch
+            patience_counter = 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+        if patience_counter >= mcfg.early_stopping_patience:
+            break
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"model_state_dict": best_state, "best_model_state_dict": best_state, "best_epoch": best_epoch},
+        ck_placebo,
+    )
+    fm_placebo.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "arm": "placebo_retrain",
+                "seed": mcfg.seed,
+                "best_epoch": int(best_epoch),
+                "best_val_loss": float(best_val),
+                "placebo_edge_mode": ecfg.placebo_edge_mode,
+                "placebo_edge_seed": ecfg.placebo_edge_seed,
+                "checkpoint_path": str(ck_placebo.resolve()),
+                "metrics_history": metrics_list,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    if mcfg.verbose:
+        print(
+            f"[model.train] placebo_retrain complete (best epoch {best_epoch}, val_loss={best_val:.6f})",
+            file=sys.stderr,
+        )
+
+
 def run_model_train(cfg: ResolvedConfig, *, overwrite: bool) -> None:
     _require_train_stack()
     from torch_geometric.loader import DataLoader
@@ -295,6 +426,8 @@ def run_model_train(cfg: ResolvedConfig, *, overwrite: bool) -> None:
         mcfg.hidden_channels,
         mcfg.num_gnn_layers,
         mcfg.pooling,
+        use_edge_weights=mcfg.use_edge_weights,
+        gat_num_heads=mcfg.gat_num_heads,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=mcfg.lr)
     loss_fn = build_training_loss(mcfg)

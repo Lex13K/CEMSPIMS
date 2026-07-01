@@ -9,6 +9,9 @@ from mss.io.paths import project_root, resolve_under_root
 
 _RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
 
+DEFAULT_SHARED_RAW = "data/shared/raw"
+DEFAULT_SHARED_INTERIM = "data/shared/interim"
+
 
 def sanitize_run_id(run_id: str) -> str:
     s = run_id.strip()
@@ -35,10 +38,18 @@ class ResolvedConfig:
 
     run_id: str
     raw_dir: Path
-    interim_dir: Path
+    shared_interim_dir: Path
+    run_interim_dir: Path
     processed_dir: Path
+    run_data_dir: Path
+    manifest_path: Path
     project_root: Path
     source_config_path: Path
+
+    @property
+    def interim_dir(self) -> Path:
+        """Backward-compatible alias for per-run interim (graph → model)."""
+        return self.run_interim_dir
 
 
 def load_resolved_config(config_path: Path, run_id: str) -> ResolvedConfig:
@@ -46,17 +57,22 @@ def load_resolved_config(config_path: Path, run_id: str) -> ResolvedConfig:
     root = project_root()
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     paths = data.get("paths") or {}
-    raw_rel = paths.get("raw", "data/raw")
+    raw_rel = paths.get("raw", DEFAULT_SHARED_RAW)
+    shared_interim_rel = paths.get("shared_interim", DEFAULT_SHARED_INTERIM)
     interim_tmpl = paths.get("interim", "data/{run_id}/interim")
     processed_tmpl = paths.get("processed", "data/{run_id}/processed")
     interim_rel = expand_path_template(str(interim_tmpl), rid)
     processed_rel = expand_path_template(str(processed_tmpl), rid)
+    run_data_rel = f"data/{rid}"
     return ResolvedConfig(
         run_id=rid,
         project_root=root,
         raw_dir=resolve_under_root(root, str(raw_rel)),
-        interim_dir=resolve_under_root(root, interim_rel),
+        shared_interim_dir=resolve_under_root(root, str(shared_interim_rel)),
+        run_interim_dir=resolve_under_root(root, interim_rel),
         processed_dir=resolve_under_root(root, processed_rel),
+        run_data_dir=resolve_under_root(root, run_data_rel),
+        manifest_path=resolve_under_root(root, f"{run_data_rel}/run_manifest.json"),
         source_config_path=config_path.resolve(),
     )
 

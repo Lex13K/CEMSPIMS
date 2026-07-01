@@ -209,11 +209,9 @@ def manifest_step_semantically_complete(cfg: ResolvedConfig) -> bool:
 
 
 def splits_paths(cfg: ResolvedConfig) -> dict[str, Path]:
-    from mss.data.ingest import IngestPaths
-
-    interim = IngestPaths.from_resolved_config(cfg).interim_dir
-    ddir = interim / "dataset"
-    gdir = interim / "graphs"
+    run_interim = cfg.run_interim_dir
+    ddir = run_interim / "dataset"
+    gdir = run_interim / "graphs"
     return {
         "dataset_dir": ddir,
         "splits": ddir / "splits.parquet",
@@ -223,5 +221,5 @@ def splits_paths(cfg: ResolvedConfig) -> dict[str, Path]:
         "universe": gdir / "universe.parquet",
         "node_features": gdir / "node_features.parquet",
         "edges": gdir / "edges.parquet",
-        "targets": interim / "targets.parquet",
+        "targets": cfg.shared_interim_dir / "targets.parquet",
     }

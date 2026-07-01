@@ -13,6 +13,7 @@ def test_validate_config_writes_resolved_paths(tmp_path) -> None:
     proc = tmp_path / "p"
     cfg.write_text(
         f'[paths]\nraw = "{raw.as_posix()}"\n'
+        f'shared_interim = "{(tmp_path / "shared").as_posix()}"\n'
         f'interim = "{inter.as_posix()}"\n'
         f'processed = "{proc.as_posix()}"\n',
         encoding="utf-8",
@@ -21,6 +22,25 @@ def test_validate_config_writes_resolved_paths(tmp_path) -> None:
         ["validate-config", "--configs-dir", str(configs_dir), "--run", "myrun"]
     )
     assert code == 0
+
+
+def test_validate_config_strict_exits_on_default_warnings(tmp_path, capsys) -> None:
+    root = Path(__file__).resolve().parents[2]
+    default_toml = root / "configs" / "default.toml"
+    if not default_toml.is_file():
+        return
+    configs_dir = tmp_path / "configs"
+    configs_dir.mkdir()
+    configs_dir.joinpath("default.toml").write_text(
+        default_toml.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    code = main(
+        ["validate-config", "--configs-dir", str(configs_dir), "--run", "default", "--strict"]
+    )
+    out = capsys.readouterr().out
+    assert "Warnings:" in out
+    assert code == 1
 
 
 def test_default_config_loads() -> None:
@@ -32,3 +52,4 @@ def test_default_config_loads() -> None:
     assert "paths" in data
     assert "{run_id}" in data["paths"].get("interim", "")
     assert "{run_id}" in data["paths"].get("processed", "")
+    assert "shared" in data["paths"].get("raw", "")

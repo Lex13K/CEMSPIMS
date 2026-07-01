@@ -37,7 +37,7 @@ def load_dataset_config(config_path: Path) -> DatasetConfig:
     if tc is not None:
         target_column = str(tc)
     else:
-        target_column = str(g_out.get("target_column", "log_rv_fwd_30"))
+        target_column = str(g_out.get("target_column", "log_rv_fwd_30cal"))
 
     return DatasetConfig(
         train_end=train_end,

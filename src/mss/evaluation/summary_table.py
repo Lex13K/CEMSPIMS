@@ -23,23 +23,32 @@ def _row_for_model_slice(
     if len(sub) == 0:
         return None
     yt = pd.to_numeric(sub["y_true"], errors="coerce").to_numpy(dtype=float)
-    if model == "gnn":
-        y_log_pred = pd.to_numeric(sub["y_pred_model"], errors="coerce").to_numpy(dtype=float)
-        pred_level = np.exp(y_log_pred)
-    elif model == "placebo":
-        y_log_pred = pd.to_numeric(sub["y_pred_placebo"], errors="coerce").to_numpy(dtype=float)
-        pred_level = np.exp(y_log_pred)
-    elif model == "har":
-        y_log_pred = pd.to_numeric(sub["y_pred_har"], errors="coerce").to_numpy(dtype=float)
+    # Benchmark columns whose level is exp(log prediction). raw_vix uses the spot VIX level.
+    _LOG_MODEL_COLS = {
+        "gnn": "y_pred_model",
+        "placebo": "y_pred_placebo",
+        "har": "y_pred_har",
+        "calibrated_vix": "y_pred_calibrated_vix",
+        "vix_har": "y_pred_vix_har",
+    }
+    if model in _LOG_MODEL_COLS:
+        col = _LOG_MODEL_COLS[model]
+        if col not in sub.columns:
+            return None
+        y_log_pred = pd.to_numeric(sub[col], errors="coerce").to_numpy(dtype=float)
         pred_level = np.exp(y_log_pred)
     else:
         y_log_pred = pd.to_numeric(sub["y_pred_vix"], errors="coerce").to_numpy(dtype=float)
         pred_level = pd.to_numeric(sub["vix"], errors="coerce").to_numpy(dtype=float)
 
-    if np.isnan(y_log_pred).any() or np.isnan(yt).any() or np.isnan(pred_level).any():
+    ok = np.isfinite(yt) & np.isfinite(y_log_pred) & np.isfinite(pred_level)
+    if int(ok.sum()) == 0:
         return None
+    yt = yt[ok]
+    y_log_pred = y_log_pred[ok]
+    pred_level = pred_level[ok]
     rv = np.exp(yt)
-    n = int(len(sub))
+    n = int(len(yt))
     return {
         "model": model,
         "sample": sample,
@@ -80,9 +89,15 @@ def build_summary_table_rows(df: pd.DataFrame, ecfg: ModelEvaluateConfig) -> lis
         ),
     ]
 
+    models = ("gnn", "placebo", "har", "vix")
+    if "y_pred_calibrated_vix" in d.columns:
+        models = models + ("calibrated_vix",)
+    if "y_pred_vix_har" in d.columns:
+        models = models + ("vix_har",)
+
     for sample_name, mask in slice_defs:
         sub = d.loc[mask]
-        for model in ("gnn", "placebo", "har", "vix"):
+        for model in models:
             row = _row_for_model_slice(sub, model=model, sample=sample_name)
             if row is not None:
                 out.append(row)

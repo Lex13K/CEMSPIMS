@@ -11,7 +11,7 @@ def join_labels(
     graph_dates: pd.Series | list,
     targets_parquet_path: Path,
     *,
-    target_column: str = "log_rv_fwd_30",
+    target_column: str = "log_rv_fwd_30cal",
     extra_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """

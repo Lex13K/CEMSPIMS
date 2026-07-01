@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +110,20 @@ def copy_run(
     Copy configs/<src>.toml -> configs/<dst>.toml and data/<src>/{interim,processed}
     -> data/<dst>/{interim,processed}. Fails if destination config or data dirs exist.
     Rewrites absolute interim/processed path prefixes inside JSON under copied trees.
+
+    .. deprecated:: Phase 1
+        Prefer ``mss.run.branch.branch_run`` for experiment branching.
     """
+    warnings.warn(
+        "copy_run is deprecated; use `python scripts/run.py branch` instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    print(
+        "Warning: `copy` duplicates full interim trees. "
+        "Prefer `branch` for shared prepare + lineage.",
+        file=sys.stderr,
+    )
     src_id = sanitize_run_id(src_run)
     dst_id = sanitize_run_id(dst_run)
     if src_id == dst_id:

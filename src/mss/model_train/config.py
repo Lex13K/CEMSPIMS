@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from mss.config.fingerprints import (
+    current_model_train_fingerprint,
+    fingerprint_toml_table,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,8 @@ class ModelTrainConfig:
     qlike_level_floor: float | None  # minimum level f; None -> use loss_eps
     warm_start_checkpoint: str | None  # optional path to donor checkpoint.pt (best weights)
     fit_log_calibration: bool  # fit y_true_log ~ a + b * y_pred on val after training
+    use_edge_weights: bool  # pass correlation magnitudes into message passing
+    gat_num_heads: int  # GAT attention heads when model_type=gat
 
 
 def model_train_table_from_parsed(data: dict[str, Any]) -> dict[str, Any]:
@@ -45,8 +50,7 @@ def model_train_table_from_parsed(data: dict[str, Any]) -> dict[str, Any]:
 
 def fingerprint_model_train_table(mt: dict[str, Any]) -> str:
     """Stable SHA-256 over canonical JSON of the training table only."""
-    payload = json.dumps(mt, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return fingerprint_toml_table(mt)
 
 
 def load_model_train_config(config_path: Path) -> ModelTrainConfig:
@@ -110,9 +114,6 @@ def load_model_train_config(config_path: Path) -> ModelTrainConfig:
         qlike_level_floor=qlike_level_floor,
         warm_start_checkpoint=warm_start_checkpoint,
         fit_log_calibration=bool(mt.get("fit_log_calibration", False)),
+        use_edge_weights=bool(mt.get("use_edge_weights", False)),
+        gat_num_heads=int(mt.get("gat_num_heads", 1)),
     )
-
-
-def current_model_train_fingerprint(config_path: Path) -> str:
-    data = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    return fingerprint_model_train_table(model_train_table_from_parsed(data))

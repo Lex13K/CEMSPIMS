@@ -2,9 +2,10 @@
 
 | Document | Description |
 |----------|-------------|
-| [../README.md](../README.md) | Overview, results, quickstart |
-| [DATA.md](DATA.md) | Raw data setup |
-| [thesis/](thesis/) | Defended thesis PDF and executive summary |
+| [../README.md](../README.md) | Overview, quickstart, pipeline list |
+| [DATA.md](DATA.md) | Raw data setup, on-disk layout, runtime reset |
+| [experiments.md](experiments.md) | Branching, ablations, scale presets |
 | [architecture.md](architecture.md) | Module and pipeline map |
 | [data_contracts.md](data_contracts.md) | Artifact schemas (developers) |
-| [figures/](figures/) | Figures used in the root README |
+| [app.md](app.md) | Experiment graph UI |
+| [figures/](figures/) | Example figures from the latest `default` run (README embeds) |

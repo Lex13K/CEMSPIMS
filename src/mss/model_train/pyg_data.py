@@ -19,6 +19,17 @@ def _date_seed(date: pd.Timestamp, base_seed: int) -> int:
     return int((int(d.value) ^ int(base_seed)) & 0xFFFFFFFF)
 
 
+def _non_identity_node_permutation(n_nodes: int, date: pd.Timestamp, seed: int) -> np.ndarray:
+    """Deterministic node relabeling; never identity when ``n_nodes > 1``."""
+    if n_nodes <= 1:
+        return np.arange(n_nodes, dtype=np.int64)
+    rng = np.random.default_rng(_date_seed(date, seed))
+    perm = rng.permutation(n_nodes)
+    if np.array_equal(perm, np.arange(n_nodes)):
+        perm = np.roll(np.arange(n_nodes), 1)
+    return perm
+
+
 def _placebo_permute_edge_index(
     edge_index: torch.Tensor,
     *,
@@ -28,8 +39,7 @@ def _placebo_permute_edge_index(
 ) -> torch.Tensor:
     if edge_index.numel() == 0 or n_nodes <= 1:
         return edge_index
-    rng = np.random.default_rng(_date_seed(date, seed))
-    perm = torch.from_numpy(rng.permutation(n_nodes)).long()
+    perm = torch.from_numpy(_non_identity_node_permutation(n_nodes, date, seed)).long()
     return perm[edge_index]
 
 
@@ -77,6 +87,7 @@ def build_graph_for_date(
     use_parquet_pushdown: bool = True,
     edge_mode: str = "actual",
     edge_placebo_seed: int = 7,
+    placebo_edge_mode: str = "zero_attr",
 ) -> Any:
     """Single `torch_geometric.data.Data` for one feature date."""
     data_mod = _get_pyg_data()
@@ -132,6 +143,10 @@ def build_graph_for_date(
             date=date,
             seed=edge_placebo_seed,
         )
+        if placebo_edge_mode == "zero_attr":
+            edge_attr = torch.zeros_like(edge_attr)
+        elif placebo_edge_mode != "permute_only":
+            raise ValueError(f"Unknown placebo_edge_mode: {placebo_edge_mode!r}")
     elif edge_mode != "actual":
         raise ValueError(f"Unknown edge_mode: {edge_mode!r}")
 
@@ -159,6 +174,7 @@ class GraphDateDataset(Dataset):
         use_parquet_pushdown: bool = True,
         edge_mode: str = "actual",
         edge_placebo_seed: int = 7,
+        placebo_edge_mode: str = "zero_attr",
     ) -> None:
         self.manifest = manifest
         self.split = split
@@ -166,6 +182,7 @@ class GraphDateDataset(Dataset):
         self.use_parquet_pushdown = use_parquet_pushdown
         self.edge_mode = edge_mode
         self.edge_placebo_seed = edge_placebo_seed
+        self.placebo_edge_mode = placebo_edge_mode
         self.dates, self.labels_df = split_filtered_dates_and_labels_df(
             manifest, split
         )
@@ -186,4 +203,5 @@ class GraphDateDataset(Dataset):
             use_parquet_pushdown=self.use_parquet_pushdown,
             edge_mode=self.edge_mode,
             edge_placebo_seed=self.edge_placebo_seed,
+            placebo_edge_mode=self.placebo_edge_mode,
         )
