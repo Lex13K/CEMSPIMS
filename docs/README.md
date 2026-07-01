@@ -8,4 +8,4 @@
 | [architecture.md](architecture.md) | Module and pipeline map |
 | [data_contracts.md](data_contracts.md) | Artifact schemas (developers) |
 | [app.md](app.md) | Experiment graph UI |
-| [figures/](figures/) | Example figures from the latest `default` run (README embeds) |
+| [figures/](figures/) | Example figures from the promoted `default` run (README embeds) |

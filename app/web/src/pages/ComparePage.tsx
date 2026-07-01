@@ -5,7 +5,7 @@ export default function ComparePage() {
   const [eligible, setEligible] = useState<string[]>([]);
   const [anchor, setAnchor] = useState("");
   const [peers, setPeers] = useState<string[]>([]);
-  const [comparisonId, setComparisonId] = useState("v2_matrix");
+  const [comparisonId, setComparisonId] = useState("v2_ablations");
   const [preset, setPreset] = useState("");
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +46,7 @@ export default function ComparePage() {
         <label>Preset (optional)</label>
         <select value={preset} onChange={(e) => setPreset(e.target.value)}>
           <option value="">— manual —</option>
-          <option value="v2_matrix">v2_matrix</option>
+          <option value="v2_ablations">v2_ablations</option>
         </select>
       </div>
 

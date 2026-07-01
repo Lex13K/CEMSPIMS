@@ -393,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         "--preset",
         type=str,
         default=None,
-        choices=("v2_matrix",),
+        choices=("v2_ablations",),
         help="Use a built-in run matrix (implies anchor + peers).",
     )
     p_cr.add_argument(

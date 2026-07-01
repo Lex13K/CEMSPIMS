@@ -152,10 +152,10 @@ def build_compare_run_specs(
 
 
 COMPARE_PRESET_LABELS: dict[str, dict[str, tuple[str, str]]] = {
-    "v2_matrix": {
-        "default": ("v2 baseline", "default"),
-        "v2_calendar_fix": ("calendar target", "v2_calendar_fix"),
-        "v2_weighted_sage": ("weighted edges", "v2_weighted_sage"),
+    "v2_ablations": {
+        "default": ("v2 baseline (512x4)", "default"),
+        "default_train_scale": ("512x6 high lr", "default_train_scale"),
+        "scale_gpu": ("1000 nodes", "scale_gpu"),
     },
 }
 
@@ -169,9 +169,9 @@ def preset_label_overrides(preset_id: str) -> tuple[RunLabelOverride, ...]:
 
 
 COMPARE_PRESETS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "v2_matrix": (
+    "v2_ablations": (
         "default",
-        ("v2_calendar_fix", "v2_weighted_sage"),
+        ("default_train_scale", "scale_gpu"),
     ),
 }
 

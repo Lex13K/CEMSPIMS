@@ -16,36 +16,55 @@ def _write_packaged_dataset(tmp_path: Path) -> tuple[Path, Path]:
     ds_dir = interim / "dataset"
     ds_dir.mkdir(parents=True, exist_ok=True)
 
-    d_train = pd.Timestamp("2020-01-02")
-    d_val = pd.Timestamp("2020-01-03")
-    d_test = pd.Timestamp("2020-01-06")
+    train_dates = pd.bdate_range("2020-01-02", periods=22)
+    val_dates = pd.bdate_range("2020-02-03", periods=2)
+    test_dates = pd.bdate_range("2020-02-06", periods=2)
+    all_dates = list(train_dates) + list(val_dates) + list(test_dates)
 
-    splits = pd.DataFrame({"date": [d_train, d_val, d_test], "split": ["train", "val", "test"]})
-    targets = pd.DataFrame({"date": [d_train, d_val, d_test], "log_rv_fwd_30cal": [0.1, 0.2, 0.3], "vix": [18.0, 19.0, 20.0]})
-    universe = pd.DataFrame(
+    splits = pd.DataFrame(
         {
-            "date": [d_train, d_train, d_val, d_val, d_test, d_test],
-            "permno": [1, 2, 1, 2, 1, 2],
-            "rank": [1, 2, 1, 2, 1, 2],
-            "mcap": [100.0, 99.0, 101.0, 98.0, 102.0, 97.0],
+            "date": list(train_dates) + list(val_dates) + list(test_dates),
+            "split": ["train"] * len(train_dates) + ["val"] * len(val_dates) + ["test"] * len(test_dates),
         }
     )
-    nf = pd.DataFrame(
+    n = len(all_dates)
+    targets = pd.DataFrame(
         {
-            "date": [d_train, d_train, d_val, d_val, d_test, d_test],
-            "permno": [1, 2, 1, 2, 1, 2],
-            "rolling_mean": [0.1, 0.2, 0.15, 0.25, 0.05, 0.12],
-            "rolling_vol": [0.9, 1.0, 0.85, 1.1, 0.8, 0.95],
+            "date": all_dates,
+            "log_rv_fwd_30cal": [0.10 + 0.01 * i for i in range(n)],
+            "log_rv_lag_5": [0.11 + 0.01 * i for i in range(n)],
+            "log_rv_lag_30": [0.12 + 0.01 * i for i in range(n)],
+            "log_rv_lag_252": [0.13 + 0.01 * i for i in range(n)],
+            "vix": [18.0 + 0.1 * i for i in range(n)],
         }
     )
-    edges = pd.DataFrame(
-        {
-            "date": [d_train, d_train, d_val, d_val, d_test, d_test],
-            "src": [1, 2, 1, 2, 1, 2],
-            "dst": [2, 1, 2, 1, 2, 1],
-            "weight": [0.5, 0.5, 0.6, 0.6, 0.4, 0.4],
-        }
-    )
+    universe_rows = []
+    nf_rows = []
+    edge_rows = []
+    for i, d in enumerate(all_dates):
+        for permno in (1, 2):
+            universe_rows.append(
+                {"date": d, "permno": permno, "rank": permno, "mcap": 100.0 + permno + 0.1 * i}
+            )
+            nf_rows.append(
+                {
+                    "date": d,
+                    "permno": permno,
+                    "rolling_mean": 0.1 * permno + 0.01 * i,
+                    "rolling_vol": 0.9 + 0.01 * permno + 0.005 * i,
+                }
+            )
+            edge_rows.append(
+                {
+                    "date": d,
+                    "src": permno,
+                    "dst": 3 - permno,
+                    "weight": 0.5 + 0.01 * i,
+                }
+            )
+    universe = pd.DataFrame(universe_rows)
+    nf = pd.DataFrame(nf_rows)
+    edges = pd.DataFrame(edge_rows)
     scaler = {
         "scaler_type": "standard",
         "feature_columns": ["rolling_mean", "rolling_vol"],

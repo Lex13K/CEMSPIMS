@@ -14,8 +14,8 @@ Canonical config: **`configs/default.toml`**. GPU scale preset: **`configs/scale
 |------|--------|
 | **Target** | `log_rv_fwd_30cal` — forward **30-calendar-day** realized S&P vol, annualized by actual observation count (horizon-aligned with VIX). `log_rv_fwd_30` remains in `targets.parquet` for robustness only. |
 | **Benchmarks** | `raw_vix` (primary H2/H3), plus `calibrated_vix`, `vix_har`, and standalone `har` as secondary benchmarks. |
-| **Graph** | Weighted Spearman edges (`use_edge_weights = true`), six node features (rolling mean/vol, log dollar volume, turnover, downside semi-vol, skew). |
-| **Universe** | Broad point-in-time **market-cap** cross-section (`selection_rule = mcap`). `dollar_volume` ranking and `sp500_membership` are optional robustness modes only. |
+| **Model** | 512×4 GraphSAGE (`lr = 1e-5`, 200 epochs, patience 15), weighted Spearman edges (`use_edge_weights = true`), six node features (rolling mean/vol, log dollar volume, turnover, downside semi-vol, skew). |
+| **Universe** | Broad point-in-time **market-cap** cross-section (`selection_rule = mcap`, 500 nodes, `top_k = 10`). `dollar_volume` ranking and `sp500_membership` are optional robustness modes only. |
 
 Formal inference (Newey–West HAC, test split):
 
@@ -28,16 +28,29 @@ Formal inference (Newey–West HAC, test split):
 | **H5** | Does the GNN beat a placebo-topology model? |
 | **H2_benchmark / incremental_vs_benchmark** | Generalized DM / incremental tests vs secondary benchmarks |
 
-![Out-of-sample forecast paths (test)](docs/figures/forecast_paths_test.png)
+![Out-of-sample forecast paths (test, default run)](docs/figures/forecast_paths_test.png)
 
-![Forecast accuracy summary (default run)](docs/figures/summary_barplot.png)
+![Forecast accuracy summary (default run, promoted config)](docs/figures/summary_barplot.png)
+
+## Results (default run)
+
+Test-split point loss (`mse_log`, lower is better) on the promoted `default` config (512×4 GraphSAGE, `lr = 1e-5`):
+
+| Model / benchmark | Test `mse_log` |
+|-------------------|----------------|
+| GNN | **0.160** |
+| `har` | 0.151 |
+| `vix_har` | 0.119 |
+| raw VIX | 0.203 |
+
+Formal tests (Newey–West HAC, test split): **H1** (Mincer–Zarnowitz) and **H5** (vs placebo topology) are significant. **H2** vs raw VIX on `mse_log` is borderline (p ≈ 0.05); QLIKE-based H2 is not significant. **H3** (incremental vs raw VIX) is not significant. The GNN beats raw VIX on point `mse_log` but **does not** beat the secondary `har` / `vix_har` benchmarks on test loss. See [docs/experiments.md](docs/experiments.md) for ablation runs.
 
 ---
 
 ## Repository layout
 
 ```
-├── configs/           # default.toml (canonical), scale_gpu.toml (GPU preset)
+├── configs/           # default.toml (canonical), scale_gpu.toml, default_train_scale.toml (ablation)
 ├── docs/              # data guide, architecture, experiments
 ├── scripts/run.py     # CLI entrypoint
 ├── src/mss/           # pipeline implementation

@@ -31,6 +31,14 @@ dmypy.json
 # Artifacts (project-specific output root, if created)
 artifacts/
 
+# App runtime / build artifacts
+data/.app_state/
+data/.app_jobs/
+app/web/dist/
+
+# TypeScript build info
+*.tsbuildinfo
+
 # Local data: shared root + per-run outputs (gitignored except structure markers)
 data/*
 !data/shared/

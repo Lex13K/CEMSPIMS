@@ -30,34 +30,34 @@ def test_load_compare_runs_config_with_section(tmp_path: Path) -> None:
     cfg.write_text(
         """
 [analysis.compare_runs]
-comparison_id = "v2_matrix"
-peer_runs = ["v2_calendar_fix", "v2_weighted_sage"]
+comparison_id = "v2_ablations"
+peer_runs = ["default_train_scale", "scale_gpu"]
 
 [[analysis.compare_runs.run_labels]]
-run_id = "v2_calendar_fix"
-label = "Calendar fix"
-column_key = "cal_fix"
+run_id = "default_train_scale"
+label = "512x6 high lr"
+column_key = "train_scale"
 """.strip(),
         encoding="utf-8",
     )
     cr = load_compare_runs_config(cfg)
-    assert cr.comparison_id == "v2_matrix"
-    assert cr.peer_runs == ("v2_calendar_fix", "v2_weighted_sage")
+    assert cr.comparison_id == "v2_ablations"
+    assert cr.peer_runs == ("default_train_scale", "scale_gpu")
     assert len(cr.run_labels) == 1
-    assert cr.run_labels[0].label == "Calendar fix"
+    assert cr.run_labels[0].label == "512x6 high lr"
 
 
-def test_resolve_preset_v2_matrix() -> None:
-    anchor, peers = resolve_preset("v2_matrix")
+def test_resolve_preset_v2_ablations() -> None:
+    anchor, peers = resolve_preset("v2_ablations")
     assert anchor == "default"
-    assert peers == ("v2_calendar_fix", "v2_weighted_sage")
+    assert peers == ("default_train_scale", "scale_gpu")
 
 
-def test_preset_label_overrides_v2_matrix() -> None:
-    overrides = preset_label_overrides("v2_matrix")
+def test_preset_label_overrides_v2_ablations() -> None:
+    overrides = preset_label_overrides("v2_ablations")
     by_id = {o.run_id: o for o in overrides}
     assert by_id["default"].column_key == "default"
-    assert by_id["v2_calendar_fix"].label == "calendar target"
+    assert by_id["default_train_scale"].label == "512x6 high lr"
 
 
 def test_config_path_for_run_direct(tmp_path: Path) -> None:
