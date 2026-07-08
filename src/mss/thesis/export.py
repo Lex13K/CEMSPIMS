@@ -27,6 +27,24 @@ from mss.evaluation.config import load_model_evaluate_config
 from mss.graph.config import load_graph_config
 from mss.io.config import ResolvedConfig
 from mss.model_train.config import load_model_train_config
+from mss.processed.paths import (
+    DIAGNOSTICS_SMOOTHING_FILENAME,
+    HYPOTHESIS_TESTS_FILENAME,
+    REGRESSION_INCREMENTAL_FILENAME,
+    REGRESSION_MZ_GNN_FILENAME,
+    SUMMARY_TABLE_FILENAME,
+    UNIVERSE_CHURN_SUMMARY_CSV,
+    forecast_comparison_path,
+    metrics_descriptive_dir,
+    metrics_formal_dir,
+    metrics_universe_dir,
+    tables_archive_dir,
+    thesis_root,
+    universe_rankbucket_replacement_heatmap_path,
+    universe_tenure_distribution_path,
+    universe_turnover_timeseries_path,
+)
+from mss.thesis.config import load_thesis_export_config
 
 
 MODEL_ORDER = ("gnn", "vix", "har", "placebo")
@@ -60,8 +78,44 @@ class ExhibitRecord:
     thesis_label: str = ""  # e.g. "Table T01", "Figure F01"; empty for legacy M*/A* rows
 
 
-def thesis_root(processed_dir: Path) -> Path:
-    return processed_dir / "thesis_exhibits"
+LEGACY_ARCHIVE_FILENAMES = (
+    "OLD_A1_full_hypothesis_output.csv",
+    "OLD_Table_T05_full_formal_hypothesis_output.csv",
+    "OLD_A2_incremental_regression.csv",
+    "OLD_Table_T06_incremental_regression_gnn_conditional_on_vix.csv",
+    "OLD_A3_mz_regression.csv",
+    "OLD_Table_T07_mincer_zarnowitz_regression_gnn.csv",
+    "OLD_A5_universe_churn_summary_full.csv",
+    "OLD_A5_universe_churn_summary_compact.csv",
+    "OLD_Table_T08_universe_churn_summary_full.csv",
+    "OLD_Table_T08_universe_churn_summary_compact.csv",
+    "OLD_A6_compact_calibration_stats.csv",
+    "OLD_Table_T09_compact_calibration_statistics.csv",
+)
+
+
+def _summary_table_src(processed_dir: Path) -> Path:
+    return metrics_descriptive_dir(processed_dir) / SUMMARY_TABLE_FILENAME
+
+
+def _hypothesis_tests_src(processed_dir: Path) -> Path:
+    return metrics_formal_dir(processed_dir) / HYPOTHESIS_TESTS_FILENAME
+
+
+def _diagnostics_smoothing_src(processed_dir: Path) -> Path:
+    return metrics_descriptive_dir(processed_dir) / DIAGNOSTICS_SMOOTHING_FILENAME
+
+
+def _regression_incremental_src(processed_dir: Path) -> Path:
+    return metrics_formal_dir(processed_dir) / REGRESSION_INCREMENTAL_FILENAME
+
+
+def _regression_mz_src(processed_dir: Path) -> Path:
+    return metrics_formal_dir(processed_dir) / REGRESSION_MZ_GNN_FILENAME
+
+
+def _universe_churn_summary_src(processed_dir: Path) -> Path:
+    return metrics_universe_dir(processed_dir) / UNIVERSE_CHURN_SUMMARY_CSV
 
 
 def _main_tables_dir(processed_dir: Path) -> Path:
@@ -500,7 +554,17 @@ def _b01_h4_years_phrase(years: tuple[int, ...]) -> str:
     return ", ".join(ys)
 
 
-def _b01_rebalance_label(freq: str) -> str:
+def _b01_rebalance_label(freq: str, universe_mode: str) -> str:
+    mode = str(universe_mode).strip().lower()
+    f = str(freq).strip().lower()
+    if mode == "fixed_replace":
+        return f"N/A (sticky cohort; config label: {f})"
+    if f == "monthly":
+        return "Monthly (last trading day of prior month)"
+    if f == "quarterly":
+        return "Quarterly (last trading day of prior quarter)"
+    if f == "daily":
+        return "Daily (feature-date anchor)"
     return str(freq).strip().title()
 
 
@@ -774,7 +838,7 @@ def _build_t02(cfg: ResolvedConfig, processed_dir: Path, ts: str) -> ExhibitReco
         ("Graph construction", "Universe mode", _b01_univ_mode_label(gc.universe_mode)),
         ("Graph construction", "Number of stocks", str(gc.n_nodes)),
         ("Graph construction", "Selection rule", _b01_selection_rule(gc.selection_rule)),
-        ("Graph construction", "Rebalance frequency", _b01_rebalance_label(gc.rebalance_freq)),
+        ("Graph construction", "Rebalance frequency", _b01_rebalance_label(gc.rebalance_freq, gc.universe_mode)),
         ("Graph construction", "Dependence measure", _b01_dependence_label(gc.dependence)),
         ("Graph construction", "Top-k neighbors", str(gc.top_k)),
         ("Graph construction", "Graph symmetrization", _b01_yes_no(gc.symmetrize)),
@@ -800,6 +864,11 @@ def _build_t02(cfg: ResolvedConfig, processed_dir: Path, ts: str) -> ExhibitReco
         # Evaluation and robustness
         ("Evaluation and robustness", "Evaluation splits", _b01_eval_splits_phrase(me.splits)),
         ("Evaluation and robustness", "H4 exclusion year(s)", _b01_h4_years_phrase(me.summary_test_exclusion_years)),
+        (
+            "Evaluation and robustness",
+            "H4 stress preset",
+            me.stress_preset_active or f"explicit override (configured preset: {me.hypothesis_stress_preset})",
+        ),
         (
             "Evaluation and robustness",
             "H4 stress window",
@@ -838,6 +907,7 @@ def _build_t03(cfg: ResolvedConfig, processed_dir: Path, ts: str) -> ExhibitReco
     drop_phrase = _t03_drop_years_phrase(me.summary_test_exclusion_years)
     stress_start = str(me.summary_test_stress_excl_start).strip()
     stress_end = str(me.summary_test_stress_excl_end).strip()
+    preset_label = me.stress_preset_active or f"explicit override (preset={me.hypothesis_stress_preset})"
 
     row_tuples: list[tuple[str, str, str]] = [
         (
@@ -861,6 +931,7 @@ def _build_t03(cfg: ResolvedConfig, processed_dir: Path, ts: str) -> ExhibitReco
             "H4 robustness (stress-window exclusion)",
             (
                 f"Test days outside the inclusive stress window from {stress_start} through {stress_end}. "
+                f"Active stress preset: {preset_label}. "
                 "Inference on this subsample assesses sensitivity to excluding that episode."
             ),
         ),
@@ -937,6 +1008,13 @@ def _build_t04(processed_dir: Path, ts: str) -> ExhibitRecord:
             "Same H2 and H3 comparisons repeated on restricted subsamples",
             "Test excluding 2020; test excluding stress window; test excluding both.",
         ),
+        (
+            "H5",
+            "Whether the GNN achieves lower out-of-sample forecast loss than the placebo benchmark.",
+            "Diebold–Mariano-type loss comparison vs placebo",
+            "QLIKE and MSE (log target) loss differential vs placebo",
+            "full test sample",
+        ),
     ]
     df = pd.DataFrame(rows, columns=list(cols))
     out_csv = _appendix_tables_dir(processed_dir) / "Table_B02_hypothesis_to_procedure_artifact_map.csv"
@@ -951,6 +1029,30 @@ def _build_t04(processed_dir: Path, ts: str) -> ExhibitRecord:
         output_formats=("csv",),
         build_timestamp_utc=ts,
         thesis_label="Table B.2",
+    )
+
+
+def _build_c04_h5(hyp: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRecord | None:
+    sub = hyp.loc[
+        (hyp["hypothesis_id"].astype(str) == "H5") & (hyp["sample"].astype(str) == "test")
+    ].copy()
+    if sub.empty:
+        return None
+    sub["_loss_order"] = sub["loss_name"].astype(str).map({"qlike": 0, "mse_log": 1}).fillna(99)
+    sub = sub.sort_values("_loss_order").drop(columns=["_loss_order"])
+    disp = _display_formal_hypothesis_frame(sub)
+    out_csv = _appendix_tables_dir(processed_dir) / "Table_C04_h5_placebo_benchmark_results.csv"
+    _write_csv(disp, out_csv)
+    return ExhibitRecord(
+        exhibit_id="C04",
+        title="Table C.4. Full-test formal hypothesis results vs placebo (H5)",
+        section="appendix",
+        output_paths=(str(out_csv),),
+        source_paths=(str(_hypothesis_tests_src(processed_dir)),),
+        filter_logic="sample == test; hypothesis_id == H5; losses {qlike,mse_log}",
+        output_formats=("csv",),
+        build_timestamp_utc=ts,
+        thesis_label="Table C.4",
     )
 
 
@@ -1006,7 +1108,7 @@ def _build_d03_quintile_table(diag: pd.DataFrame, processed_dir: Path, ts: str) 
         title="Table D.3. Log-scale forecast error by target-volatility quintile on the full test sample.",
         section="appendix",
         output_paths=(str(out_csv),),
-        source_paths=(str(processed_dir / "summaries" / "diagnostics_smoothing.csv"),),
+        source_paths=(str(_diagnostics_smoothing_src(processed_dir)),),
         filter_logic="MSE (log) by target-volatility quintile; full test",
         output_formats=("csv",),
         build_timestamp_utc=ts,
@@ -1026,7 +1128,7 @@ def _build_d04_quintile_table(diag: pd.DataFrame, processed_dir: Path, ts: str) 
         title="Table D.4. Log-scale forecast error by target-volatility quintile on the test sample excluding 2020.",
         section="appendix",
         output_paths=(str(out_csv),),
-        source_paths=(str(processed_dir / "summaries" / "diagnostics_smoothing.csv"),),
+        source_paths=(str(_diagnostics_smoothing_src(processed_dir)),),
         filter_logic="MSE (log) by target-volatility quintile; test excluding configured years",
         output_formats=("csv",),
         build_timestamp_utc=ts,
@@ -1085,6 +1187,7 @@ def _write_thesis_table_index(processed_dir: Path, ts: str) -> None:
         "| Table C.1 | C01 | Table_C01_formal_test_subsamples_used_in_robustness_analysis.csv |",
         "| Table C.2 | C02 | Table_C02_full_test_formal_hypothesis_results.csv |",
         "| Table C.3 | C03 | Table_C03_restricted_subsample_robustness_results.csv |",
+        "| Table C.4 | C04 | Table_C04_h5_placebo_benchmark_results.csv |",
         "| Table D.1 | D01 | Table_D01_calibration_diagnostics_full_test_sample.csv |",
         "| Table D.2 | D02 | Table_D02_calibration_diagnostics_test_sample_excluding_2020.csv |",
         "| Table D.3 | D03 | Table_D03_log_scale_forecast_error_by_target_volatility_quintile_full_test_sample.csv |",
@@ -1147,7 +1250,7 @@ def _build_m1(summary: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRec
         title="Out-of-Sample Forecast Accuracy on Full Test Sample",
         section="main",
         output_paths=(str(out_csv), str(out_tex)),
-        source_paths=(str(processed_dir / "summaries" / "summary_table.csv"),),
+        source_paths=(str(_summary_table_src(processed_dir)),),
         filter_logic="sample == full_test; model in {gnn,vix,har,placebo}",
         output_formats=("csv", "tex"),
         build_timestamp_utc=ts,
@@ -1155,7 +1258,7 @@ def _build_m1(summary: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRec
 
 
 def _build_m2(processed_dir: Path, ts: str) -> ExhibitRecord:
-    src = processed_dir / "figures" / "target_vs_model_vix" / "target_vs_model_vix_test.png"
+    src = forecast_comparison_path(processed_dir, "test")
     if (not src.is_file()) or src.stat().st_size <= 0:
         raise FileNotFoundError(f"M2 source figure missing/empty: {src}")
     # Decode test to ensure file is readable.
@@ -1234,7 +1337,7 @@ def _build_m3(hyp: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRecord:
         title="Formal Hypothesis Tests on Full Test Sample (H1-H3)",
         section="main",
         output_paths=(str(out_csv), str(out_tex)),
-        source_paths=(str(processed_dir / "summaries" / "hypothesis_tests.csv"),),
+        source_paths=(str(_hypothesis_tests_src(processed_dir)),),
         filter_logic="sample == test; hypothesis_id in {H1,H2,H3}; include H2 losses {qlike,mse_log}",
         output_formats=("csv", "tex"),
         build_timestamp_utc=ts,
@@ -1312,7 +1415,7 @@ def _build_m4(hyp: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRecord:
         title="Robustness to Excluding Extreme Episodes (H4)",
         section="main",
         output_paths=(str(out_csv), str(out_tex)),
-        source_paths=(str(processed_dir / "summaries" / "hypothesis_tests.csv"),),
+        source_paths=(str(_hypothesis_tests_src(processed_dir)),),
         filter_logic="H4 rows; samples in {test_excl_2020,test_excl_stress,test_excl_union}; procedures DM+incremental",
         output_formats=("csv", "tex"),
         build_timestamp_utc=ts,
@@ -1373,7 +1476,7 @@ def _build_m5(diag: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRecord
         title="Forecast Error by Volatility Regime Quintile (Test Sample)",
         section="main",
         output_paths=(str(out_png), str(out_pdf)),
-        source_paths=(str(processed_dir / "summaries" / "diagnostics_smoothing.csv"),),
+        source_paths=(str(_diagnostics_smoothing_src(processed_dir)),),
         filter_logic="sample == full_test; diagnostic == mse_log_by_target_vol_quantile; model in {gnn,vix,har,placebo}",
         output_formats=("png", "pdf"),
         build_timestamp_utc=ts,
@@ -1381,16 +1484,42 @@ def _build_m5(diag: pd.DataFrame, processed_dir: Path, ts: str) -> ExhibitRecord
 
 
 def _build_a1(
-    hyp: pd.DataFrame, processed_dir: Path, ts: str
-) -> tuple[ExhibitRecord, ExhibitRecord, ExhibitRecord, ExhibitRecord]:
-    src = processed_dir / "summaries" / "hypothesis_tests.csv"
+    hyp: pd.DataFrame, processed_dir: Path, ts: str, *, legacy_archive: bool
+) -> tuple[ExhibitRecord | None, ExhibitRecord | None, ExhibitRecord, ExhibitRecord]:
+    src = _hypothesis_tests_src(processed_dir)
     if not src.is_file():
         raise FileNotFoundError(f"A1 source missing: {src}")
-    out = _appendix_tables_dir(processed_dir) / "OLD_A1_full_hypothesis_output.csv"
-    out_t05 = _appendix_tables_dir(processed_dir) / "OLD_Table_T05_full_formal_hypothesis_output.csv"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, out)
-    shutil.copy2(src, out_t05)
+
+    r_a1: ExhibitRecord | None = None
+    r_t05: ExhibitRecord | None = None
+    if legacy_archive:
+        archive = tables_archive_dir(processed_dir)
+        archive.mkdir(parents=True, exist_ok=True)
+        out = archive / "OLD_A1_full_hypothesis_output.csv"
+        out_t05 = archive / "OLD_Table_T05_full_formal_hypothesis_output.csv"
+        shutil.copy2(src, out)
+        shutil.copy2(src, out_t05)
+        r_a1 = ExhibitRecord(
+            exhibit_id="A1",
+            title="OLD: full hypothesis_tests.csv copy (archival audit trail)",
+            section="appendix",
+            output_paths=(str(out),),
+            source_paths=(str(src),),
+            filter_logic="verbatim copy of metrics/formal/hypothesis_tests.csv",
+            output_formats=("csv",),
+            build_timestamp_utc=ts,
+        )
+        r_t05 = ExhibitRecord(
+            exhibit_id="T05",
+            title="OLD: verbatim hypothesis_tests.csv (archival; use Table_C02 / Table_C03 for thesis)",
+            section="appendix",
+            output_paths=(str(out_t05),),
+            source_paths=(str(src),),
+            filter_logic="verbatim copy of metrics/formal/hypothesis_tests.csv; thesis display in Table_C02_*, Table_C03_*",
+            output_formats=("csv",),
+            build_timestamp_utc=ts,
+            thesis_label="",
+        )
 
     c02_src = _t05_c02_candidates(hyp)
     c03_src = _t05_c03_candidates(hyp)
@@ -1410,27 +1539,6 @@ def _build_a1(
     _write_csv(disp_c02, c02_csv)
     _write_csv(disp_c03, c03_csv)
 
-    r_a1 = ExhibitRecord(
-        exhibit_id="A1",
-        title="OLD: full hypothesis_tests.csv copy (archival audit trail)",
-        section="appendix",
-        output_paths=(str(out),),
-        source_paths=(str(src),),
-        filter_logic="verbatim copy of summaries/hypothesis_tests.csv",
-        output_formats=("csv",),
-        build_timestamp_utc=ts,
-    )
-    r_t05 = ExhibitRecord(
-        exhibit_id="T05",
-        title="OLD: verbatim hypothesis_tests.csv (archival; use Table_C02 / Table_C03 for thesis)",
-        section="appendix",
-        output_paths=(str(out_t05),),
-        source_paths=(str(src),),
-        filter_logic="verbatim copy of summaries/hypothesis_tests.csv; thesis display in Table_C02_*, Table_C03_*",
-        output_formats=("csv",),
-        build_timestamp_utc=ts,
-        thesis_label="",
-    )
     r_c02 = ExhibitRecord(
         exhibit_id="C02",
         title="Table C.2. Full-test formal hypothesis results (H1–H3)",
@@ -1462,11 +1570,10 @@ def _build_a2(reg_inc: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhi
         ("sample", "term", "coef", "se_hac", "t", "p_two_sided", "ci_lo_95", "ci_hi_95", "r_squared", "n_obs"),
         name="A2 regression_incremental.csv",
     )
-    out_csv = _appendix_tables_dir(processed_dir) / "OLD_A2_incremental_regression.csv"
-    out_t6_csv = (
-        _appendix_tables_dir(processed_dir)
-        / "OLD_Table_T06_incremental_regression_gnn_conditional_on_vix.csv"
-    )
+    archive = tables_archive_dir(processed_dir)
+    archive.mkdir(parents=True, exist_ok=True)
+    out_csv = archive / "OLD_A2_incremental_regression.csv"
+    out_t6_csv = archive / "OLD_Table_T06_incremental_regression_gnn_conditional_on_vix.csv"
     _write_csv(reg_inc, out_csv)
     _write_csv(reg_inc, out_t6_csv)
     r_a2 = ExhibitRecord(
@@ -1474,8 +1581,8 @@ def _build_a2(reg_inc: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhi
         title="OLD: incremental regression regression_incremental.csv (archival)",
         section="appendix",
         output_paths=(str(out_csv),),
-        source_paths=(str(processed_dir / "summaries" / "regression_incremental.csv"),),
-        filter_logic="verbatim copy of summaries/regression_incremental.csv",
+        source_paths=(str(_regression_incremental_src(processed_dir)),),
+        filter_logic="verbatim copy of metrics/formal/regression_incremental.csv",
         output_formats=("csv",),
         build_timestamp_utc=ts,
     )
@@ -1484,7 +1591,7 @@ def _build_a2(reg_inc: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhi
         title="OLD: duplicate incremental regression export (same as A2)",
         section="appendix",
         output_paths=(str(out_t6_csv),),
-        source_paths=(str(processed_dir / "summaries" / "regression_incremental.csv"),),
+        source_paths=(str(_regression_incremental_src(processed_dir)),),
         filter_logic="duplicate of OLD_A2_*",
         output_formats=("csv",),
         build_timestamp_utc=ts,
@@ -1499,8 +1606,10 @@ def _build_a3(reg_mz: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhib
         ("sample", "term", "coef", "se_hac", "t", "p_two_sided", "ci_lo_95", "ci_hi_95", "r_squared", "n_obs"),
         name="A3 regression_mz_gnn.csv",
     )
-    out_csv = _appendix_tables_dir(processed_dir) / "OLD_A3_mz_regression.csv"
-    out_t7_csv = _appendix_tables_dir(processed_dir) / "OLD_Table_T07_mincer_zarnowitz_regression_gnn.csv"
+    archive = tables_archive_dir(processed_dir)
+    archive.mkdir(parents=True, exist_ok=True)
+    out_csv = archive / "OLD_A3_mz_regression.csv"
+    out_t7_csv = archive / "OLD_Table_T07_mincer_zarnowitz_regression_gnn.csv"
     _write_csv(reg_mz, out_csv)
     _write_csv(reg_mz, out_t7_csv)
     r_a3 = ExhibitRecord(
@@ -1508,8 +1617,8 @@ def _build_a3(reg_mz: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhib
         title="OLD: MZ regression regression_mz_gnn.csv (archival)",
         section="appendix",
         output_paths=(str(out_csv),),
-        source_paths=(str(processed_dir / "summaries" / "regression_mz_gnn.csv"),),
-        filter_logic="verbatim copy of summaries/regression_mz_gnn.csv",
+        source_paths=(str(_regression_mz_src(processed_dir)),),
+        filter_logic="verbatim copy of metrics/formal/regression_mz_gnn.csv",
         output_formats=("csv",),
         build_timestamp_utc=ts,
     )
@@ -1518,7 +1627,7 @@ def _build_a3(reg_mz: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhib
         title="OLD: duplicate MZ regression export (same as A3)",
         section="appendix",
         output_paths=(str(out_t7_csv),),
-        source_paths=(str(processed_dir / "summaries" / "regression_mz_gnn.csv"),),
+        source_paths=(str(_regression_mz_src(processed_dir)),),
         filter_logic="duplicate of OLD_A3_*",
         output_formats=("csv",),
         build_timestamp_utc=ts,
@@ -1528,9 +1637,9 @@ def _build_a3(reg_mz: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhib
 
 
 def _build_a4(processed_dir: Path, ts: str) -> tuple[ExhibitRecord, ExhibitRecord]:
-    src1 = processed_dir / "figures" / "universe_churn" / "universe_turnover_timeseries.png"
-    src2 = processed_dir / "figures" / "universe_churn" / "universe_rankbucket_replacement_heatmap.png"
-    src3 = processed_dir / "figures" / "universe_churn" / "universe_tenure_distribution.png"
+    src1 = universe_turnover_timeseries_path(processed_dir)
+    src2 = universe_rankbucket_replacement_heatmap_path(processed_dir)
+    src3 = universe_tenure_distribution_path(processed_dir)
     for p in (src1, src2, src3):
         if (not p.is_file()) or p.stat().st_size <= 0:
             raise FileNotFoundError(f"A4 source figure missing/empty: {p}")
@@ -1582,11 +1691,13 @@ def _build_a4(processed_dir: Path, ts: str) -> tuple[ExhibitRecord, ExhibitRecor
 def _build_a5(univ_summary: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[ExhibitRecord, ExhibitRecord]:
     if len(univ_summary) == 0:
         raise ValueError("A5: universe_churn_summary.csv is empty")
-    src = processed_dir / "summaries" / "universe_churn_summary.csv"
-    out_full = _appendix_tables_dir(processed_dir) / "OLD_A5_universe_churn_summary_full.csv"
-    out_compact = _appendix_tables_dir(processed_dir) / "OLD_A5_universe_churn_summary_compact.csv"
-    out_t8_full = _appendix_tables_dir(processed_dir) / "OLD_Table_T08_universe_churn_summary_full.csv"
-    out_t8_compact = _appendix_tables_dir(processed_dir) / "OLD_Table_T08_universe_churn_summary_compact.csv"
+    src = _universe_churn_summary_src(processed_dir)
+    archive = tables_archive_dir(processed_dir)
+    archive.mkdir(parents=True, exist_ok=True)
+    out_full = archive / "OLD_A5_universe_churn_summary_full.csv"
+    out_compact = archive / "OLD_A5_universe_churn_summary_compact.csv"
+    out_t8_full = archive / "OLD_Table_T08_universe_churn_summary_full.csv"
+    out_t8_compact = archive / "OLD_Table_T08_universe_churn_summary_compact.csv"
     out_full.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, out_full)
     shutil.copy2(src, out_t8_full)
@@ -1648,8 +1759,10 @@ def _build_a6(diag: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhibit
     sub_full = _diagnostics_calibration_long_subset(diag)
     sub = sub_full[["sample", "diagnostic", "model", "value"]].copy()
 
-    out_csv = _appendix_tables_dir(processed_dir) / "OLD_A6_compact_calibration_stats.csv"
-    out_t9_csv = _appendix_tables_dir(processed_dir) / "OLD_Table_T09_compact_calibration_statistics.csv"
+    archive = tables_archive_dir(processed_dir)
+    archive.mkdir(parents=True, exist_ok=True)
+    out_csv = archive / "OLD_A6_compact_calibration_stats.csv"
+    out_t9_csv = archive / "OLD_Table_T09_compact_calibration_statistics.csv"
     _write_csv(sub, out_csv)
     _write_csv(sub, out_t9_csv)
     r_a6 = ExhibitRecord(
@@ -1657,7 +1770,7 @@ def _build_a6(diag: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhibit
         title="OLD: compact calibration long-format export (archival)",
         section="appendix",
         output_paths=(str(out_csv),),
-        source_paths=(str(processed_dir / "summaries" / "diagnostics_smoothing.csv"),),
+        source_paths=(str(_diagnostics_smoothing_src(processed_dir)),),
         filter_logic="sample in {full_test,excl_2020}; diagnostics in {forecast_variance_log,corr_with_target_log,mz_intercept,mz_slope}; models in {gnn,vix,har,placebo}",
         output_formats=("csv",),
         build_timestamp_utc=ts,
@@ -1667,7 +1780,7 @@ def _build_a6(diag: pd.DataFrame, processed_dir: Path, ts: str) -> tuple[Exhibit
         title="OLD: duplicate compact calibration long-format (same as A6)",
         section="appendix",
         output_paths=(str(out_t9_csv),),
-        source_paths=(str(processed_dir / "summaries" / "diagnostics_smoothing.csv"),),
+        source_paths=(str(_diagnostics_smoothing_src(processed_dir)),),
         filter_logic="duplicate of OLD_A6_*",
         output_formats=("csv",),
         build_timestamp_utc=ts,
@@ -1688,7 +1801,7 @@ def _build_d01_d02_calibration_thesis(
     p02 = _appendix_tables_dir(processed_dir) / "Table_D02_calibration_diagnostics_test_sample_excluding_2020.csv"
     _write_csv(d01, p01)
     _write_csv(d02, p02)
-    src = str(processed_dir / "summaries" / "diagnostics_smoothing.csv")
+    src = str(_diagnostics_smoothing_src(processed_dir))
     r1 = ExhibitRecord(
         exhibit_id="D01",
         title="Table D.1. Calibration diagnostics for the full test sample.",
@@ -1747,12 +1860,12 @@ def _write_manifest(processed_dir: Path, records: list[ExhibitRecord]) -> None:
 
 
 def expected_paths_for_thesis_export(cfg: ResolvedConfig) -> list[Path]:
+    te = load_thesis_export_config(cfg.source_config_path)
     proc = Path(cfg.processed_dir)
     app_tables = _appendix_tables_dir(proc)
     app_fig = _appendix_figures_dir(proc)
     man = _manifest_dir(proc)
     thesis_tables = [
-        # Thesis-facing appendix tables (CSV only)
         "Table_A01_data_inputs_and_roles.csv",
         "Table_A02_wrds_crsp_raw_input_schema.csv",
         "Table_A03_required_target_and_benchmark_schema.csv",
@@ -1765,19 +1878,6 @@ def expected_paths_for_thesis_export(cfg: ResolvedConfig) -> list[Path]:
         "Table_D02_calibration_diagnostics_test_sample_excluding_2020.csv",
         "Table_D03_log_scale_forecast_error_by_target_volatility_quintile_full_test_sample.csv",
         "Table_D04_log_scale_forecast_error_by_target_volatility_quintile_test_sample_excluding_2020.csv",
-        # Archival / pipeline (OLD_ prefix)
-        "OLD_A1_full_hypothesis_output.csv",
-        "OLD_Table_T05_full_formal_hypothesis_output.csv",
-        "OLD_A2_incremental_regression.csv",
-        "OLD_Table_T06_incremental_regression_gnn_conditional_on_vix.csv",
-        "OLD_A3_mz_regression.csv",
-        "OLD_Table_T07_mincer_zarnowitz_regression_gnn.csv",
-        "OLD_A5_universe_churn_summary_full.csv",
-        "OLD_A5_universe_churn_summary_compact.csv",
-        "OLD_Table_T08_universe_churn_summary_full.csv",
-        "OLD_Table_T08_universe_churn_summary_compact.csv",
-        "OLD_A6_compact_calibration_stats.csv",
-        "OLD_Table_T09_compact_calibration_statistics.csv",
     ]
     out: list[Path] = [
         _main_tables_dir(proc) / "M1_oos_fulltest_accuracy.csv",
@@ -1803,6 +1903,9 @@ def expected_paths_for_thesis_export(cfg: ResolvedConfig) -> list[Path]:
             man / "thesis_exhibits_manifest.json",
         ]
     )
+    if te.legacy_archive:
+        archive = tables_archive_dir(proc)
+        out.extend(archive / name for name in LEGACY_ARCHIVE_FILENAMES)
     return out
 
 
@@ -1814,17 +1917,19 @@ def run_thesis_export(cfg: ResolvedConfig, *, overwrite: bool) -> None:
 
     ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    summary = pd.read_csv(proc / "summaries" / "summary_table.csv")
-    hyp = pd.read_csv(proc / "summaries" / "hypothesis_tests.csv")
-    diag = pd.read_csv(proc / "summaries" / "diagnostics_smoothing.csv")
-    reg_inc = pd.read_csv(proc / "summaries" / "regression_incremental.csv")
-    reg_mz = pd.read_csv(proc / "summaries" / "regression_mz_gnn.csv")
-    univ_summary = pd.read_csv(proc / "summaries" / "universe_churn_summary.csv")
+    summary = pd.read_csv(_summary_table_src(proc))
+    hyp = pd.read_csv(_hypothesis_tests_src(proc))
+    diag = pd.read_csv(_diagnostics_smoothing_src(proc))
+    reg_inc = pd.read_csv(_regression_incremental_src(proc))
+    reg_mz = pd.read_csv(_regression_mz_src(proc))
+    univ_summary = pd.read_csv(_universe_churn_summary_src(proc))
 
     if overwrite:
         root = thesis_root(proc)
         if root.is_dir():
             shutil.rmtree(root)
+
+    te_cfg = load_thesis_export_config(cfg.source_config_path)
 
     records: list[ExhibitRecord] = []
     records.append(_build_m1(summary, proc, ts))
@@ -1832,19 +1937,24 @@ def run_thesis_export(cfg: ResolvedConfig, *, overwrite: bool) -> None:
     records.append(_build_m3(hyp, proc, ts))
     records.append(_build_m4(hyp, proc, ts))
     records.append(_build_m5(diag, proc, ts))
-    r_a1, r_t05, r_c02, r_c03 = _build_a1(hyp, proc, ts)
-    r_a2, r_t06 = _build_a2(reg_inc, proc, ts)
-    r_a3, r_t07 = _build_a3(reg_mz, proc, ts)
+    r_a1, r_t05, r_c02, r_c03 = _build_a1(hyp, proc, ts, legacy_archive=te_cfg.legacy_archive)
     r_a4, r_f01 = _build_a4(proc, ts)
-    r_a5, r_t08 = _build_a5(univ_summary, proc, ts)
-    r_a6, r_t09 = _build_a6(diag, proc, ts)
     r_d01, r_d02 = _build_d01_d02_calibration_thesis(diag, proc, ts)
-    records.extend([r_a1, r_a2, r_a3, r_a4, r_a5, r_a6])
+    records.extend([r_a4, r_c02, r_c03])
+    if te_cfg.legacy_archive:
+        r_a2, r_t06 = _build_a2(reg_inc, proc, ts)
+        r_a3, r_t07 = _build_a3(reg_mz, proc, ts)
+        r_a5, r_t08 = _build_a5(univ_summary, proc, ts)
+        r_a6, r_t09 = _build_a6(diag, proc, ts)
+        records.extend([r_a1, r_a2, r_a3, r_a5, r_a6, r_t05, r_t06, r_t07, r_t08, r_t09])
     records.extend(_build_appendix_a_input_schema_tables(proc, ts))
     records.append(_build_t02(cfg, proc, ts))
     records.append(_build_t03(cfg, proc, ts))
     records.append(_build_t04(proc, ts))
-    records.extend([r_t05, r_c02, r_c03, r_t06, r_t07, r_t08, r_t09, r_d01, r_d02])
+    r_c04 = _build_c04_h5(hyp, proc, ts)
+    records.extend([r_d01, r_d02])
+    if r_c04 is not None:
+        records.append(r_c04)
     records.append(_build_d03_quintile_table(diag, proc, ts))
     records.append(_build_d04_quintile_table(diag, proc, ts))
     records.append(r_f01)

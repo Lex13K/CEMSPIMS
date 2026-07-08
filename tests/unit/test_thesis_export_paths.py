@@ -1,23 +1,24 @@
-"""Sanity check: thesis.export expected path set is stable and under thesis_exhibits/."""
+"""Sanity check: thesis.export expected path set is stable and under tables/thesis/."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from mss.io.config import load_resolved_config
-from mss.thesis.export import expected_paths_for_thesis_export, thesis_root
+from mss.processed.paths import tables_archive_dir, thesis_root
+from mss.thesis.export import expected_paths_for_thesis_export
 
 
-def test_expected_paths_are_under_thesis_exhibits() -> None:
+def test_expected_paths_are_under_tables_thesis() -> None:
     root = Path(__file__).resolve().parents[2]
     cfg = load_resolved_config(root / "configs" / "default.toml", "default")
     paths = expected_paths_for_thesis_export(cfg)
-    assert len(paths) >= 25
+    assert len(paths) >= 20
     tr = thesis_root(Path(cfg.processed_dir))
     for p in paths:
-        assert tr in p.resolve().parents or p.resolve().parent == tr.parent
-        # All outputs live inside .../processed/thesis_exhibits/...
-        assert "thesis_exhibits" in str(p)
+        rel = p.resolve().relative_to(tr.parent.resolve())
+        parts = rel.as_posix().split("/")
+        assert parts[0] in ("thesis", "archive")
 
 
 def test_thesis_table_filenames_present() -> None:
@@ -33,7 +34,14 @@ def test_thesis_table_filenames_present() -> None:
     assert "Figure_F01_universe_diagnostics_plate.png" in names
     assert "Reproducibility_metadata.json" in names
     assert "thesis_table_index.md" in names
-    assert "OLD_A1_full_hypothesis_output.csv" in names
+    assert "OLD_A1_full_hypothesis_output.csv" not in names
     assert "Table_C02_full_test_formal_hypothesis_results.csv" in names
     assert "Table_C03_restricted_subsample_robustness_results.csv" in names
     assert "Table_A01_data_inputs_and_roles.tex" not in names
+
+
+def test_legacy_archive_paths_optional() -> None:
+    root = Path(__file__).resolve().parents[2]
+    cfg = load_resolved_config(root / "configs" / "default.toml", "default")
+    archive = tables_archive_dir(Path(cfg.processed_dir))
+    assert all(archive not in p.parents for p in expected_paths_for_thesis_export(cfg))

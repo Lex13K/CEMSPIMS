@@ -1,0 +1,118 @@
+# GPU scale config (Phase 9): promoted default train recipe on a larger graph.
+# Mirrors configs/default.toml [model.train] (512x4, lr 1e-5) except graph scale knobs below.
+# Node-count presets: set [graph.universe].n_nodes to 500 / 1000 / 1500 and rebuild graph.prepare.
+
+[paths]
+raw = "data/shared/raw"
+shared_interim = "data/shared/interim"
+interim = "data/{run_id}/interim"
+processed = "data/{run_id}/processed"
+
+[graph]
+ret_col = "ret_used"
+align_feature_dates_with_targets = true
+show_progress = true
+verbose = true
+debug_progress = false
+
+[graph.rolling_window]
+length = 20
+min_obs_frac = 0.8
+
+[graph.universe]
+universe_mode = "fixed_replace"
+# Scale knob: 500 (baseline) / 1000 (this preset) / 1500 (large).
+n_nodes = 1000
+selection_rule = "mcap"
+rebalance_freq = "monthly"
+restrict_to_sp500 = false
+sp500_membership_path = ""
+n_jobs = 4
+progress_every = 50
+
+[graph.edges]
+dependence = "spearman"
+# Scale knob: denser graph for larger universes.
+top_k = 20
+symmetrize = true
+n_jobs = 8
+update_every = 100
+
+[graph.node_features]
+rolling_mean = true
+rolling_vol = true
+include_log_dollar_volume = true
+include_turnover = true
+include_downside_semivol = true
+include_skew = true
+n_jobs = 4
+progress_every = 50
+
+[graph.output]
+target_column = "log_rv_fwd_30cal"
+
+[dataset]
+train_end = "2014-12-31"
+val_end = "2018-12-31"
+test_end = "2024-12-31"
+scaler_type = "standard"
+feature_columns = ["rolling_mean", "rolling_vol", "log_dollar_volume", "turnover", "downside_semivol", "skew"]
+write_scaled_features = true
+
+[model.train]
+seed = 32
+max_epochs = 200
+lr = 0.00001
+early_stopping_patience = 15
+# Scale knob: wider and deeper model for the larger graph.
+hidden_channels = 512
+num_gnn_layers = 4
+model_type = "graphsage"
+pooling = "mean"
+dataloader_num_workers = 4
+batch_size = 32
+show_progress = true
+verbose = true
+device = "auto"
+pin_memory = true
+graph_cache_dir = ""
+parquet_date_pushdown = true
+loss = "mse_log"
+loss_eps = 1e-12
+smooth_l1_beta = 1.0
+fit_log_calibration = false
+use_edge_weights = true
+
+[model.evaluate]
+splits = ["train", "val", "test"]
+batch_size = 64
+device = "auto"
+verbose = true
+summary_test_exclusion_years = [2020]
+summary_train_crisis_excl_start = "2008-09-01"
+summary_train_crisis_excl_end = "2009-03-31"
+hypothesis_hac_max_lags = 29
+hypothesis_dm_losses = ["qlike", "mse_log"]
+hypothesis_dm_benchmarks = ["calibrated_vix", "vix_har", "har"]
+hypothesis_incremental_benchmarks = ["calibrated_vix", "vix_har", "har"]
+apply_log_calibration = false
+apply_log_calibration_placebo = false
+enable_placebo_ablation = true
+placebo_edge_seed = 7
+placebo_edge_mode = "zero_attr"
+# GPU scale runs can afford the retrained-placebo H5 arm (doubles train cost).
+placebo_retrain = false
+fit_vix_log_calibration = false
+hypothesis_dm_losses_vs_placebo = ["qlike", "mse_log"]
+hypothesis_stress_preset = "rate_shock_2022"
+summary_test_stress_excl_start = "2022-01-01"
+summary_test_stress_excl_end = "2022-10-31"
+hypothesis_h4_include_h1 = false
+
+[thesis.export]
+legacy_archive = false
+
+[analysis.summarize]
+verbose = true
+dpi = 150
+draw_hypothesis_table = true

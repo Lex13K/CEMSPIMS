@@ -8,22 +8,30 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from mss.io.config import ResolvedConfig
+from mss.config.fingerprints import (
+    current_model_train_fingerprint,
+    write_dataset_fingerprint_sidecar,
+    write_graph_fingerprint_sidecar,
+)
 from mss.pipeline.completeness import model_cache_graphs_step_semantically_complete
 from mss.pipeline.artifacts import ensure_step_inputs_ready, step_is_complete
+from tests.conftest import make_resolved_config
 
 
 def _cfg(tmp: Path, *, run: str = "t") -> ResolvedConfig:
     cfg_toml = tmp / "cfg.toml"
-    cfg_toml.write_text("", encoding="utf-8")
-    return ResolvedConfig(
-        run_id=run,
-        project_root=tmp,
-        raw_dir=tmp / "raw",
-        interim_dir=tmp / "interim",
-        processed_dir=tmp / "processed",
-        source_config_path=cfg_toml.resolve(),
+    cfg_toml.write_text(
+        "[graph.universe]\nn_nodes = 500\n\n"
+        "[dataset]\ntrain_end = \"2014-12-31\"\nval_end = \"2018-12-31\"\n"
+        "test_end = \"2024-12-31\"\n\n[model.train]\nseed = 42\n",
+        encoding="utf-8",
     )
+    return make_resolved_config(tmp, run_id=run, source_config_path=cfg_toml.resolve())
+
+
+def _stamp_upstream_fingerprints(cfg: ResolvedConfig) -> None:
+    write_graph_fingerprint_sidecar(cfg)
+    write_dataset_fingerprint_sidecar(cfg)
 
 
 def _write_minimal_manifest_and_inputs(tmp: Path, *, target_column: str) -> dict[str, Path]:
@@ -120,6 +128,7 @@ def test_model_cache_graphs_step_semantically_complete(tmp_path: Path) -> None:
 
     (cache_dir / "2020-01-02.pt").write_bytes(b"x")
     (cache_dir / "2020-01-03.pt").write_bytes(b"y")
+    _stamp_upstream_fingerprints(cfg)
 
     assert model_cache_graphs_step_semantically_complete(cfg)
 
@@ -143,6 +152,7 @@ def test_step_is_complete_model_cache_graphs_respects_final_files(tmp_path: Path
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "2020-01-02.pt").write_bytes(b"x")
     (cache_dir / "2020-01-03.pt").write_bytes(b"y")
+    _stamp_upstream_fingerprints(cfg)
     assert step_is_complete("model.cache_graphs", "materialize", cfg)
 
 

@@ -1,13 +1,13 @@
 """List column names for raw CSV inputs.
 
-By default this inspects the canonical raw files under ``data/raw``:
+By default this inspects the canonical raw files under ``data/shared/raw``:
 - WRDS.csv
 - snp500_volatility.csv
 - VIX.csv
 
 Usage:
     python scripts/list_raw_columns.py
-    python scripts/list_raw_columns.py --raw-dir data/raw --files WRDS.csv VIX.csv
+    python scripts/list_raw_columns.py --raw-dir data/shared/raw --files WRDS.csv VIX.csv
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--raw-dir",
         type=Path,
-        default=Path("data/raw"),
-        help="Directory containing raw CSV files (default: data/raw).",
+        default=Path("data/shared/raw"),
+        help="Directory containing raw CSV files (default: data/shared/raw).",
     )
     parser.add_argument(
         "--files",

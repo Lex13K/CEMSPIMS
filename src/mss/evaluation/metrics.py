@@ -98,8 +98,11 @@ def aggregate_test_metric_value(
 
 def qlike_level(y_true_level: np.ndarray, y_pred_level: np.ndarray, *, eps: float = 1e-12) -> float:
     """
-    QLIKE on variance/volatility-in-level space:
+    QLIKE on annualized volatility in level (%) space:
       mean(log(f_t) + y_t / f_t)
+
+    In forecast_panel, y_true_level is forward realized vol (%) and benchmark
+    level forecasts (VIX, mapped GNN/placebo) use the same units.
     """
     y = np.clip(np.asarray(y_true_level, dtype=float), eps, None)
     f = np.clip(np.asarray(y_pred_level, dtype=float), eps, None)

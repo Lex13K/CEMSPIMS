@@ -15,26 +15,26 @@ from mss.evaluation.config import ModelEvaluateConfig
 
 # Verbatim thesis statements (README + data_contracts must match).
 H1_NULL = (
-    "The GNN forecast contains no predictive information about future 30-trading-day "
+    "The GNN forecast contains no predictive information about future 30-calendar-day "
     "realized market volatility."
 )
 H1_ALT = (
-    "The GNN forecast contains predictive information about future 30-trading-day "
+    "The GNN forecast contains predictive information about future 30-calendar-day "
     "realized market volatility."
 )
 
 H2_NULL = (
-    "The GNN does not achieve lower out-of-sample forecast loss than the VIX benchmark."
+    "The GNN does not achieve lower out-of-sample forecast loss than the raw VIX benchmark."
 )
-H2_ALT = "The GNN achieves lower out-of-sample forecast loss than the VIX benchmark."
+H2_ALT = "The GNN achieves lower out-of-sample forecast loss than the raw VIX benchmark."
 
 H3_NULL = (
-    "Conditional on the VIX benchmark, the GNN forecast adds no additional predictive "
-    "information about future 30-trading-day realized market volatility."
+    "Conditional on the raw VIX benchmark, the GNN forecast adds no additional predictive "
+    "information about future 30-calendar-day realized market volatility."
 )
 H3_ALT = (
-    "Conditional on the VIX benchmark, the GNN forecast adds additional predictive "
-    "information about future 30-trading-day realized market volatility."
+    "Conditional on the raw VIX benchmark, the GNN forecast adds additional predictive "
+    "information about future 30-calendar-day realized market volatility."
 )
 
 H4_NULL = (
@@ -46,15 +46,49 @@ H4_ALT = (
     "market episodes are excluded from the test sample."
 )
 
+H5_NULL = (
+    "The GNN does not achieve lower out-of-sample forecast loss than the placebo benchmark."
+)
+H5_ALT = (
+    "The GNN achieves lower out-of-sample forecast loss than the placebo benchmark."
+)
+
 DM_LOSS_COL = {"qlike": "d_qlike_t", "mse_log": "d_mse_log_t"}
+DM_LOSS_COL_PLACEBO = {"qlike": "d_qlike_placebo_t", "mse_log": "d_mse_log_placebo_t"}
+
+# v2 benchmark suite mappings. raw_vix is the canonical H2/H3 comparison; the others drive
+# generalized DM (H2_benchmark) and incremental_vs_benchmark rows distinguished by the benchmark field.
+BENCHMARK_DM_LOSS_COL = {
+    "raw_vix": {"qlike": "d_qlike_t", "mse_log": "d_mse_log_t"},
+    "calibrated_vix": {"qlike": "d_qlike_calibrated_vix_t", "mse_log": "d_mse_log_calibrated_vix_t"},
+    "vix_har": {"qlike": "d_qlike_vix_har_t", "mse_log": "d_mse_log_vix_har_t"},
+    "har": {"qlike": "d_qlike_har_t", "mse_log": "d_mse_log_har_t"},
+}
+BENCHMARK_LOG_COL = {
+    "raw_vix": "y_pred_vix_log",
+    "calibrated_vix": "y_pred_calibrated_vix_log",
+    "vix_har": "y_pred_vix_har_log",
+    "har": "y_pred_har_log",
+}
+BENCHMARK_DISPLAY = {
+    "raw_vix": "raw spot VIX (primary market-implied benchmark)",
+    "calibrated_vix": "train-calibrated (bias-adjusted) VIX",
+    "vix_har": "hybrid implied-plus-historical (VIX-HAR) benchmark",
+    "har": "standalone realized-vol HAR benchmark",
+}
 DM_LOSS_DEFINITION = {
     "qlike": "QLIKE level: d_t = L_VIX_t - L_GNN_t per date; positive => lower loss for GNN.",
     "mse_log": "MSE in log target: d_t = squared_err_VIX - squared_err_GNN; positive => GNN better.",
+}
+DM_LOSS_DEFINITION_PLACEBO = {
+    "qlike": "QLIKE level: d_t = L_placebo_t - L_GNN_t per date; positive => lower loss for GNN.",
+    "mse_log": "MSE in log target: d_t = squared_err_placebo - squared_err_GNN; positive => GNN better.",
 }
 
 PROC_MZ = "mz_gnn"
 PROC_DM = "dm_loss_diff"
 PROC_INC = "incremental_gnn_vix"
+PROC_INC_BENCH = "incremental_vs_benchmark"
 PROC_AUDIT = "subsample_audit"
 
 STAT_HAC_T = "hac_t"
@@ -265,6 +299,136 @@ def build_formal_subsample_specs(df: pd.DataFrame, ecfg: ModelEvaluateConfig) ->
     return out
 
 
+def _benchmark_dm_rows(
+    sub: pd.DataFrame,
+    ecfg: ModelEvaluateConfig,
+    *,
+    hac_max_lags: int,
+    sample_name: str,
+    audit: dict[str, Any],
+    stress_notes: str,
+) -> list[dict[str, Any]]:
+    """Generalized DM (H2-style) rows for each secondary benchmark; raw_vix stays canonical H2."""
+    rows: list[dict[str, Any]] = []
+    for bench in ecfg.hypothesis_dm_benchmarks:
+        loss_map = BENCHMARK_DM_LOSS_COL.get(bench, {})
+        disp = BENCHMARK_DISPLAY.get(bench, bench)
+        for loss in ecfg.hypothesis_dm_losses:
+            col = loss_map.get(loss)
+            if col is None or col not in sub.columns:
+                continue
+            d = pd.to_numeric(sub[col], errors="coerce").to_numpy(dtype=float)
+            d = d[np.isfinite(d)]
+            if len(d) < 5:
+                continue
+            _, t_dm, p_two, p_upper = _dm_hac(d, maxlags=hac_max_lags)
+            rows.append(
+                {
+                    "hypothesis_id": "H2_benchmark",
+                    "inference_procedure": PROC_DM,
+                    "statistic_type": STAT_HAC_T_MEAN,
+                    "null_hypothesis": (
+                        f"The GNN does not achieve lower out-of-sample forecast loss than the {disp}."
+                    ),
+                    "alternative": (
+                        f"The GNN achieves lower out-of-sample forecast loss than the {disp}."
+                    ),
+                    "test_name": "diebold_mariano_mean_loss_diff",
+                    "sample": sample_name,
+                    "benchmark": bench,
+                    "coefficient_tested": "",
+                    "test_scope": "mean_loss_difference",
+                    "joint_hypothesis": "none",
+                    "tail": "upper",
+                    "alternative_direction": "mean_d_gt_0_favors_gnn",
+                    "better_model": "gnn",
+                    "loss_name": loss,
+                    "loss_definition": (
+                        f"d_t = L_{bench}_t - L_GNN_t per date; positive => lower loss for GNN."
+                    ),
+                    "statistic": t_dm,
+                    "p_value_primary": p_upper,
+                    "p_value_two_sided": p_two,
+                    "p_value_one_sided_upper": p_upper,
+                    "hac_max_lags": hac_max_lags,
+                    "n_obs": int(len(d)),
+                    **audit,
+                    "notes": (
+                        f"Generalized DM vs {disp}; raw_vix remains the primary H2 benchmark."
+                        + stress_notes
+                    ),
+                }
+            )
+    return rows
+
+
+def _benchmark_incremental_rows(
+    sub: pd.DataFrame,
+    ecfg: ModelEvaluateConfig,
+    *,
+    hac_max_lags: int,
+    sample_name: str,
+    dep: str,
+    audit: dict[str, Any],
+    stress_notes: str,
+) -> list[dict[str, Any]]:
+    """incremental_vs_benchmark rows: HAC t on the GNN slope conditional on each secondary benchmark."""
+    rows: list[dict[str, Any]] = []
+    for bench in ecfg.hypothesis_incremental_benchmarks:
+        bcol = BENCHMARK_LOG_COL.get(bench)
+        disp = BENCHMARK_DISPLAY.get(bench, bench)
+        if bcol is None or bcol not in sub.columns:
+            continue
+        y = pd.to_numeric(sub[dep], errors="coerce").to_numpy(dtype=float)
+        xm = pd.to_numeric(sub["y_pred_model_log"], errors="coerce").to_numpy(dtype=float)
+        xb = pd.to_numeric(sub[bcol], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(y) & np.isfinite(xm) & np.isfinite(xb)
+        y, xm, xb = y[ok], xm[ok], xb[ok]
+        if len(y) < 5:
+            continue
+        X = np.column_stack([np.ones(len(y)), xm, xb])
+        names = ["const", "y_pred_model_log", bcol]
+        t_sl, p_sl = _mz_incremental_rows(y, X, names, maxlags=hac_max_lags, idx_test=1)
+        rows.append(
+            {
+                "hypothesis_id": "H3_benchmark",
+                "inference_procedure": PROC_INC_BENCH,
+                "statistic_type": STAT_HAC_T,
+                "null_hypothesis": (
+                    f"Conditional on the {disp}, the GNN forecast adds no additional predictive "
+                    "information about future 30-calendar-day realized market volatility."
+                ),
+                "alternative": (
+                    f"Conditional on the {disp}, the GNN forecast adds additional predictive "
+                    "information about future 30-calendar-day realized market volatility."
+                ),
+                "test_name": "incremental_gnn_slope_with_benchmark",
+                "sample": sample_name,
+                "benchmark": bench,
+                "coefficient_tested": "y_pred_model_log",
+                "test_scope": "slope_only",
+                "joint_hypothesis": "none",
+                "tail": "two_sided",
+                "alternative_direction": "beta_gnn_neq_0_conditional_on_benchmark",
+                "better_model": "",
+                "loss_name": "",
+                "loss_definition": "",
+                "statistic": t_sl,
+                "p_value_primary": p_sl,
+                "p_value_two_sided": p_sl,
+                "p_value_one_sided_upper": "",
+                "hac_max_lags": hac_max_lags,
+                "n_obs": int(len(y)),
+                **audit,
+                "notes": (
+                    f"incremental_vs_benchmark: two-sided HAC t on GNN slope conditional on {disp}."
+                    + stress_notes
+                ),
+            }
+        )
+    return rows
+
+
 def run_hypothesis_tests(
     panel: pd.DataFrame,
     ecfg: ModelEvaluateConfig,
@@ -283,6 +447,11 @@ def run_hypothesis_tests(
 
     specs = build_formal_subsample_specs(panel, ecfg)
     dep = "y_true_log"
+
+    stress_notes = (
+        f" stress_preset={ecfg.stress_preset_active or 'override'}; "
+        f"stress_window=[{ecfg.summary_test_stress_excl_start}, {ecfg.summary_test_stress_excl_end}]."
+    )
 
     h4_note_suffix = (
         " H4 re-runs the same procedures as H1–H3 on restricted formal test subsamples "
@@ -304,6 +473,7 @@ def run_hypothesis_tests(
                     "alternative": H4_ALT,
                     "test_name": "subsample_skipped_duplicate",
                     "sample": sample_name,
+                    "benchmark": "",
                     "coefficient_tested": "",
                     "test_scope": "subsample_audit",
                     "joint_hypothesis": "none",
@@ -319,7 +489,7 @@ def run_hypothesis_tests(
                     "hac_max_lags": hac_max_lags,
                     "n_obs": spec.n_obs,
                     **_audit_fields_from_spec(spec),
-                    "notes": spec.skip_reason + h4_note_suffix,
+                    "notes": spec.skip_reason + h4_note_suffix + stress_notes,
                 }
             )
             continue
@@ -354,6 +524,7 @@ def run_hypothesis_tests(
                         "alternative": H1_ALT if th == "H1" else H4_ALT,
                         "test_name": "mincer_zarnowitz_gnn_slope",
                         "sample": sample_name,
+                        "benchmark": "none",
                         "coefficient_tested": "y_pred_model_log",
                         "test_scope": "slope_only",
                         "joint_hypothesis": "none",
@@ -369,7 +540,7 @@ def run_hypothesis_tests(
                         "hac_max_lags": hac_max_lags,
                         "n_obs": int(len(y)),
                         **audit,
-                        "notes": base_notes + (h4_note_suffix if th == "H4" else ""),
+                        "notes": base_notes + (h4_note_suffix if th == "H4" else "") + stress_notes,
                     }
                 )
                 mz_all.extend(
@@ -409,6 +580,7 @@ def run_hypothesis_tests(
                     "alternative": H2_ALT if th == "H2" else H4_ALT,
                     "test_name": "diebold_mariano_mean_loss_diff",
                     "sample": sample_name,
+                    "benchmark": "raw_vix",
                     "coefficient_tested": "",
                     "test_scope": "mean_loss_difference",
                     "joint_hypothesis": "none",
@@ -424,9 +596,53 @@ def run_hypothesis_tests(
                     "hac_max_lags": hac_max_lags,
                     "n_obs": int(len(d)),
                     **audit,
-                    "notes": base_notes + (h4_note_suffix if th == "H4" else ""),
+                    "notes": base_notes + (h4_note_suffix if th == "H4" else "") + stress_notes,
                 }
             )
+
+        # --- DM vs placebo (H5, primary test only)
+        if is_primary_sample:
+            for loss in ecfg.hypothesis_dm_losses_vs_placebo:
+                col = DM_LOSS_COL_PLACEBO.get(loss)
+                if col is None or col not in sub.columns:
+                    continue
+                d = pd.to_numeric(sub[col], errors="coerce").to_numpy(dtype=float)
+                d = d[np.isfinite(d)]
+                if len(d) < 5:
+                    continue
+                _, t_dm, p_two, p_upper = _dm_hac(d, maxlags=hac_max_lags)
+                base_notes = (
+                    "H5: primary p_value is one-sided upper (E[d]>0, d=L_placebo-L_GNN); "
+                    "two-sided DM p in p_value_two_sided."
+                )
+                hrows.append(
+                    {
+                        "hypothesis_id": "H5",
+                        "inference_procedure": PROC_DM,
+                        "statistic_type": STAT_HAC_T_MEAN,
+                        "null_hypothesis": H5_NULL,
+                        "alternative": H5_ALT,
+                        "test_name": "diebold_mariano_mean_loss_diff_vs_placebo",
+                        "sample": sample_name,
+                        "benchmark": "placebo",
+                        "coefficient_tested": "",
+                        "test_scope": "mean_loss_difference",
+                        "joint_hypothesis": "none",
+                        "tail": "upper",
+                        "alternative_direction": "mean_d_gt_0_favors_gnn",
+                        "better_model": "gnn",
+                        "loss_name": loss,
+                        "loss_definition": DM_LOSS_DEFINITION_PLACEBO[loss],
+                        "statistic": t_dm,
+                        "p_value_primary": p_upper,
+                        "p_value_two_sided": p_two,
+                        "p_value_one_sided_upper": p_upper,
+                        "hac_max_lags": hac_max_lags,
+                        "n_obs": int(len(d)),
+                        **audit,
+                        "notes": base_notes + stress_notes,
+                    }
+                )
 
         # --- Incremental (H3 / H4)
         y = pd.to_numeric(sub[dep], errors="coerce").to_numpy(dtype=float)
@@ -452,6 +668,7 @@ def run_hypothesis_tests(
                     "alternative": H3_ALT if th == "H3" else H4_ALT,
                     "test_name": "incremental_gnn_slope_with_vix",
                     "sample": sample_name,
+                    "benchmark": "raw_vix",
                     "coefficient_tested": "y_pred_model_log",
                     "test_scope": "slope_only",
                     "joint_hypothesis": "none",
@@ -467,7 +684,7 @@ def run_hypothesis_tests(
                     "hac_max_lags": hac_max_lags,
                     "n_obs": int(len(y)),
                     **audit,
-                    "notes": base_notes + (h4_note_suffix if th == "H4" else ""),
+                    "notes": base_notes + (h4_note_suffix if th == "H4" else "") + stress_notes,
                 }
             )
             inc_all.extend(
@@ -483,6 +700,25 @@ def run_hypothesis_tests(
                 )
             )
 
+        # --- Generalized benchmark comparisons (primary test only).
+        # raw_vix stays the canonical H2/H3 above; secondary benchmarks get DM rows
+        # (hypothesis_id H2_benchmark) and incremental_vs_benchmark rows (H3_benchmark),
+        # distinguished by the `benchmark` field. We deliberately do not relabel these as
+        # "beyond VIX": each row states the benchmark it conditions on / competes against.
+        if is_primary_sample:
+            hrows.extend(
+                _benchmark_dm_rows(
+                    sub, ecfg, hac_max_lags=hac_max_lags, sample_name=sample_name,
+                    audit=audit, stress_notes=stress_notes,
+                )
+            )
+            hrows.extend(
+                _benchmark_incremental_rows(
+                    sub, ecfg, hac_max_lags=hac_max_lags, sample_name=sample_name,
+                    dep=dep, audit=audit, stress_notes=stress_notes,
+                )
+            )
+
     if not hrows:
         hrows.append(
             {
@@ -493,6 +729,7 @@ def run_hypothesis_tests(
                 "alternative": "",
                 "test_name": "none",
                 "sample": "",
+                "benchmark": "",
                 "coefficient_tested": "",
                 "test_scope": "",
                 "joint_hypothesis": "none",

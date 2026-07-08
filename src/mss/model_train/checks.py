@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mss.data.ingest import IngestPaths
 from mss.io.config import ResolvedConfig
 
 
@@ -16,7 +15,7 @@ FINAL_METRICS_FILENAME = "final_metrics.json"
 
 
 def model_train_dir(cfg: ResolvedConfig) -> Path:
-    return IngestPaths.from_resolved_config(cfg).interim_dir / "model_train"
+    return cfg.run_interim_dir / "model_train"
 
 
 def final_metrics_path(cfg: ResolvedConfig) -> Path:
@@ -51,8 +50,25 @@ def check_final_metrics_complete(path: Path) -> dict[str, Any]:
     return out
 
 
+def model_train_step_semantic_only(cfg: ResolvedConfig) -> bool:
+    chk = check_final_metrics_complete(final_metrics_path(cfg))
+    return bool(chk.get("passed"))
+
+
 def model_train_step_semantically_complete(cfg: ResolvedConfig) -> bool:
-    return bool(check_final_metrics_complete(final_metrics_path(cfg)).get("passed"))
+    if not model_train_step_semantic_only(cfg):
+        return False
+    from mss.config.fingerprints import (
+        dataset_fingerprint_matches,
+        graph_fingerprint_matches,
+        train_fingerprint_matches,
+    )
+
+    return (
+        train_fingerprint_matches(cfg)
+        and graph_fingerprint_matches(cfg)
+        and dataset_fingerprint_matches(cfg)
+    )
 
 
 def can_resume_training(cfg: ResolvedConfig) -> bool:

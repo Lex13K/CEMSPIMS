@@ -17,17 +17,24 @@ from mss.data.returns_panel import check_returns_panel
 from mss.data.targets import check_targets
 from mss.graph.config import GraphConfig, load_graph_config
 from mss.graph.expected import compute_expected_feature_dates, normalized_date_set
+from mss.config.fingerprints import (
+    dataset_fingerprint_matches,
+    evaluate_fingerprint_matches,
+    graph_fingerprint_matches,
+    train_fingerprint_matches,
+)
 from mss.io.config import ResolvedConfig
+from mss.run.paths import graphs_dir
 
 
 def _graphs_dir(cfg: ResolvedConfig) -> Path:
-    return IngestPaths.from_resolved_config(cfg).interim_dir / "graphs"
+    return graphs_dir(cfg)
 
 
 def ingest_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     """Tier-1: manifest + required parquet outputs exist (same as before, no stale detection)."""
     paths = IngestPaths.from_resolved_config(cfg)
-    interim = paths.interim_dir
+    interim = paths.prepare_interim_dir
     if not (interim / "ingest_manifest.json").is_file():
         return False
     if not (interim / "sp500_returns.parquet").is_file():
@@ -42,7 +49,7 @@ def ingest_step_semantically_complete(cfg: ResolvedConfig) -> bool:
 
 def returns_panel_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     paths = IngestPaths.from_resolved_config(cfg)
-    p = paths.interim_dir / "returns_panel.parquet"
+    p = paths.prepare_interim_dir / "returns_panel.parquet"
     if not p.is_file():
         return False
     try:
@@ -59,7 +66,7 @@ def returns_panel_step_semantically_complete(cfg: ResolvedConfig) -> bool:
 
 
 def targets_step_semantically_complete(cfg: ResolvedConfig) -> bool:
-    interim = IngestPaths.from_resolved_config(cfg).interim_dir
+    interim = IngestPaths.from_resolved_config(cfg).prepare_interim_dir
     tg = interim / "targets.parquet"
     man = interim / "targets_manifest.json"
     if not tg.is_file() or not man.is_file():
@@ -88,19 +95,20 @@ def targets_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     return bool(chk.get("passed"))
 
 
-def feature_dates_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def feature_dates_step_semantic_only(cfg: ResolvedConfig) -> bool:
     """stage04_dates matches recomputed expected dates from returns + graph config."""
     try:
         gc = load_graph_config(cfg.source_config_path)
     except OSError:
         return False
     paths = IngestPaths.from_resolved_config(cfg)
-    interim = paths.interim_dir
-    out = interim / "stage04_dates.parquet"
-    rp = interim / "returns_panel.parquet"
+    shared = paths.prepare_interim_dir
+    run_interim = cfg.run_interim_dir
+    out = run_interim / "stage04_dates.parquet"
+    rp = shared / "returns_panel.parquet"
     if not out.is_file() or not rp.is_file():
         return False
-    tg_path = interim / "targets.parquet" if gc.align_feature_dates_with_targets else None
+    tg_path = shared / "targets.parquet" if gc.align_feature_dates_with_targets else None
     if gc.align_feature_dates_with_targets and (tg_path is None or not tg_path.is_file()):
         return False
     try:
@@ -111,17 +119,21 @@ def feature_dates_step_semantically_complete(cfg: ResolvedConfig) -> bool:
         actual = pd.read_parquet(out, columns=["date"])["date"]
     except Exception:
         return False
-    e = pd.to_datetime(expected).dt.normalize().sort_values().reset_index(drop=True)
-    a = pd.to_datetime(actual).dt.normalize().sort_values().reset_index(drop=True)
-    return len(e) == len(a) and e.equals(a)
+    return normalized_date_set(expected) == normalized_date_set(actual)
 
 
-def universe_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def feature_dates_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not feature_dates_step_semantic_only(cfg):
+        return False
+    return graph_fingerprint_matches(cfg)
+
+
+def universe_step_semantic_only(cfg: ResolvedConfig) -> bool:
     """Universe dates match stage04_dates exactly (same set)."""
     paths = IngestPaths.from_resolved_config(cfg)
-    interim = paths.interim_dir
+    run_interim = cfg.run_interim_dir
     univ_path = _graphs_dir(cfg) / "universe.parquet"
-    stage04 = interim / "stage04_dates.parquet"
+    stage04 = run_interim / "stage04_dates.parquet"
     if not univ_path.is_file() or not stage04.is_file():
         return False
     try:
@@ -132,7 +144,13 @@ def universe_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     return normalized_date_set(u_dates) == normalized_date_set(s_dates)
 
 
-def node_features_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def universe_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not universe_step_semantic_only(cfg):
+        return False
+    return graph_fingerprint_matches(cfg)
+
+
+def node_features_step_semantic_only(cfg: ResolvedConfig) -> bool:
     """Row count matches universe; contract checks pass."""
     from mss.graph import checks as graph_checks
 
@@ -157,12 +175,18 @@ def node_features_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     if int(n_nf) != int(n_u):
         return False
     res = graph_checks.check_node_features(
-        nf_path, feature_cols=("rolling_mean", "rolling_vol")
+        nf_path, feature_cols=load_graph_config(cfg.source_config_path).node_feature_column_names()
     )
     return bool(res.get("passed"))
 
 
-def edges_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def node_features_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not node_features_step_semantic_only(cfg):
+        return False
+    return graph_fingerprint_matches(cfg)
+
+
+def edges_step_semantic_only(cfg: ResolvedConfig) -> bool:
     """Distinct edge dates match universe (catches partial edges checkpoint)."""
     from mss.graph import checks as graph_checks
 
@@ -194,22 +218,72 @@ def edges_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     return bool(res.get("passed"))
 
 
-def dataset_splits_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def edges_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not edges_step_semantic_only(cfg):
+        return False
+    return graph_fingerprint_matches(cfg)
+
+
+def graph_prepare_semantic_only(cfg: ResolvedConfig) -> bool:
+    """True when all graph.prepare substeps pass semantic checks (no fingerprint)."""
+    return (
+        feature_dates_step_semantic_only(cfg)
+        and universe_step_semantic_only(cfg)
+        and node_features_step_semantic_only(cfg)
+        and edges_step_semantic_only(cfg)
+    )
+
+
+def dataset_splits_step_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.dataset.checks import splits_step_semantically_complete
 
     return splits_step_semantically_complete(cfg)
 
 
-def dataset_scaler_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def dataset_splits_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not dataset_splits_step_semantic_only(cfg):
+        return False
+    return dataset_fingerprint_matches(cfg)
+
+
+def dataset_scaler_step_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.dataset.checks import scaler_step_semantically_complete
 
     return scaler_step_semantically_complete(cfg)
 
 
-def dataset_manifest_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def dataset_scaler_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not dataset_scaler_step_semantic_only(cfg):
+        return False
+    return dataset_fingerprint_matches(cfg)
+
+
+def dataset_manifest_step_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.dataset.checks import manifest_step_semantically_complete
 
     return manifest_step_semantically_complete(cfg)
+
+
+def dataset_manifest_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not dataset_manifest_step_semantic_only(cfg):
+        return False
+    return dataset_fingerprint_matches(cfg)
+
+
+def dataset_package_semantic_only(cfg: ResolvedConfig) -> bool:
+    return (
+        dataset_splits_step_semantic_only(cfg)
+        and dataset_scaler_step_semantic_only(cfg)
+        and dataset_manifest_step_semantic_only(cfg)
+    )
+
+
+def _upstream_graph_dataset_fingerprints_ok(cfg: ResolvedConfig) -> bool:
+    return graph_fingerprint_matches(cfg) and dataset_fingerprint_matches(cfg)
+
+
+def _evaluate_fingerprints_ok(cfg: ResolvedConfig) -> bool:
+    return evaluate_fingerprint_matches(cfg) and train_fingerprint_matches(cfg)
 
 
 def model_train_step_semantically_complete(cfg: ResolvedConfig) -> bool:
@@ -218,14 +292,14 @@ def model_train_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     return mt_done(cfg)
 
 
-def model_cache_graphs_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+def model_cache_graphs_step_semantic_only(cfg: ResolvedConfig) -> bool:
     """Semantic completion for the canonical PyG graph cache materialization step.
 
     This returns True only when *all* expected per-date `.pt` files exist and are non-empty.
     """
 
     paths = IngestPaths.from_resolved_config(cfg)
-    interim = paths.interim_dir
+    interim = cfg.run_interim_dir
 
     man_path = interim / "dataset" / "manifest.json"
     if not man_path.is_file():
@@ -261,46 +335,94 @@ def model_cache_graphs_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     return True
 
 
-def model_evaluate_score_splits_semantically_complete(cfg: ResolvedConfig) -> bool:
+def model_cache_graphs_step_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not model_cache_graphs_step_semantic_only(cfg):
+        return False
+    return _upstream_graph_dataset_fingerprints_ok(cfg)
+
+
+def model_evaluate_pipeline_semantic_only(cfg: ResolvedConfig) -> bool:
+    from mss.evaluation.checks import model_evaluate_pipeline_semantically_complete as done
+
+    return done(cfg)
+
+
+def model_evaluate_score_splits_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.evaluation.checks import model_evaluate_score_splits_semantically_complete as done
 
     return done(cfg)
 
 
-def model_evaluate_compute_error_series_semantically_complete(cfg: ResolvedConfig) -> bool:
+def model_evaluate_score_splits_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not model_evaluate_score_splits_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
+
+
+def model_evaluate_compute_error_series_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.evaluation.checks import model_evaluate_aggregate_test_loss_semantically_complete as done
 
+    return done(cfg)
+
+
+def model_evaluate_compute_error_series_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not model_evaluate_compute_error_series_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
+
+
+def model_evaluate_aggregate_test_loss_semantic_only(cfg: ResolvedConfig) -> bool:
+    from mss.evaluation.checks import model_evaluate_aggregate_test_loss_semantically_complete as done
     return done(cfg)
 
 
 def model_evaluate_aggregate_test_loss_semantically_complete(cfg: ResolvedConfig) -> bool:
-    from mss.evaluation.checks import model_evaluate_aggregate_test_loss_semantically_complete as done
-    return done(cfg)
+    if not model_evaluate_aggregate_test_loss_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
 
 
-def model_evaluate_write_summary_table_semantically_complete(cfg: ResolvedConfig) -> bool:
+def model_evaluate_write_summary_table_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.evaluation.checks import model_evaluate_write_summary_table_semantically_complete as done
 
     return done(cfg)
 
 
-def model_evaluate_write_forecast_panel_semantically_complete(cfg: ResolvedConfig) -> bool:
+def model_evaluate_write_summary_table_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not model_evaluate_write_summary_table_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
+
+
+def model_evaluate_write_forecast_panel_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.evaluation.checks import model_evaluate_write_forecast_panel_semantically_complete as done
 
     return done(cfg)
 
 
-def model_evaluate_run_hypothesis_tests_semantically_complete(cfg: ResolvedConfig) -> bool:
+def model_evaluate_write_forecast_panel_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not model_evaluate_write_forecast_panel_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
+
+
+def model_evaluate_run_hypothesis_tests_semantic_only(cfg: ResolvedConfig) -> bool:
     from mss.evaluation.checks import model_evaluate_run_hypothesis_tests_semantically_complete as done
 
     return done(cfg)
 
 
+def model_evaluate_run_hypothesis_tests_semantically_complete(cfg: ResolvedConfig) -> bool:
+    if not model_evaluate_run_hypothesis_tests_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
+
+
 def model_evaluate_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     """Full model.evaluate pipeline."""
-    from mss.evaluation.checks import model_evaluate_pipeline_semantically_complete as done
-
-    return done(cfg)
+    if not model_evaluate_pipeline_semantic_only(cfg):
+        return False
+    return _evaluate_fingerprints_ok(cfg)
 
 
 def analysis_summarize_loss_figure_semantically_complete(cfg: ResolvedConfig) -> bool:
@@ -321,6 +443,25 @@ def thesis_export_semantically_complete(cfg: ResolvedConfig) -> bool:
     from mss.thesis.export import expected_paths_for_thesis_export
 
     for p in expected_paths_for_thesis_export(cfg):
+        if not p.is_file():
+            return False
+        try:
+            if p.stat().st_size <= 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def analysis_compare_runs_semantically_complete(cfg: ResolvedConfig) -> bool:
+    from mss.analysis.compare_config import load_compare_runs_config
+    from mss.analysis.compare_runs import expected_paths_for_compare
+
+    cr = load_compare_runs_config(cfg.source_config_path)
+    cid = cr.comparison_id.strip()
+    if not cid:
+        return False
+    for p in expected_paths_for_compare(cfg, cid):
         if not p.is_file():
             return False
         try:

@@ -13,7 +13,7 @@ def test_ingest_raw_to_parquet_and_validate(tmp_path) -> None:
     raw = tmp_path / "raw"
     interim = tmp_path / "interim"
     write_minimal_raw(raw)
-    paths = IngestPaths(raw_dir=raw, interim_dir=interim)
+    paths = IngestPaths(raw_dir=raw, prepare_interim_dir=interim)
 
     out = ingest_raw_to_parquet(paths, overwrite=False)
     assert out.manifest_path.is_file()

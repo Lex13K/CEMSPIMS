@@ -28,9 +28,10 @@ from mss.evaluation.checks import (
     summary_table_path,
     test_loss_path,
 )
-from mss.evaluation.metrics import aggregate_test_metric_value
+from mss.processed.readmes import ensure_processed_readmes
 from mss.evaluation.summary_table import build_summary_table_rows
 from mss.evaluation.config import load_model_evaluate_config
+from mss.evaluation.metrics import aggregate_test_metric_value
 from mss.io.config import ResolvedConfig
 from mss.model_train.checks import check_final_metrics_complete, final_metrics_path, model_train_dir
 from mss.model_train.log_calibration import LOG_CALIBRATION_JSON, load_log_calibration_json
@@ -89,6 +90,8 @@ def run_score_splits(cfg: ResolvedConfig, *, overwrite: bool) -> None:
         mtrain_cfg.hidden_channels,
         mtrain_cfg.num_gnn_layers,
         mtrain_cfg.pooling,
+        use_edge_weights=mtrain_cfg.use_edge_weights,
+        gat_num_heads=mtrain_cfg.gat_num_heads,
     )
     ck_path = model_train_dir(cfg) / "checkpoint.pt"
     if not ck_path.is_file():
@@ -137,6 +140,7 @@ def run_score_splits(cfg: ResolvedConfig, *, overwrite: bool) -> None:
                 use_parquet_pushdown=mtrain_cfg.parquet_date_pushdown,
                 edge_mode="placebo_permute",
                 edge_placebo_seed=ecfg.placebo_edge_seed,
+                placebo_edge_mode=ecfg.placebo_edge_mode,
             )
             if len(ds_placebo) != len(ds):
                 raise RuntimeError(
@@ -149,10 +153,39 @@ def run_score_splits(cfg: ResolvedConfig, *, overwrite: bool) -> None:
                 disable=not ecfg.verbose,
                 file=sys.stderr,
             )
+            # Retrained-placebo arm: score placebo graphs with a model trained on placebo graphs,
+            # instead of the real model. Falls back to the real model when the arm is disabled or
+            # the placebo checkpoint is missing.
+            placebo_model = model
+            if ecfg.placebo_retrain:
+                from mss.model_train.train_loop import placebo_checkpoint_path
+
+                pck = placebo_checkpoint_path(cfg)
+                if pck.is_file():
+                    placebo_model = build_model(
+                        mtrain_cfg.model_type,
+                        in_channels,
+                        mtrain_cfg.hidden_channels,
+                        mtrain_cfg.num_gnn_layers,
+                        mtrain_cfg.pooling,
+                        use_edge_weights=mtrain_cfg.use_edge_weights,
+                        gat_num_heads=mtrain_cfg.gat_num_heads,
+                    )
+                    pbundle = torch.load(pck, map_location=device, weights_only=False)
+                    pstate = pbundle.get("best_model_state_dict") or pbundle["model_state_dict"]
+                    placebo_model.load_state_dict(pstate)
+                    placebo_model.to(device)
+                    placebo_model.eval()
+                elif ecfg.verbose:
+                    print(
+                        f"[model.evaluate] placebo_retrain=true but missing {pck}; "
+                        "scoring placebo graphs with the real model.",
+                        file=sys.stderr,
+                    )
             with torch.no_grad():
                 for batch in iterator_placebo:
                     batch = batch.to(device)
-                    out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+                    out = placebo_model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
                     preds_placebo.extend(out.detach().cpu().numpy().astype(float).tolist())
             if len(preds_placebo) != len(preds):
                 raise RuntimeError(
@@ -190,12 +223,13 @@ def run_score_splits(cfg: ResolvedConfig, *, overwrite: bool) -> None:
             preds_cal = (a + b * pd.to_numeric(forecasts["y_pred_model"], errors="coerce")).to_numpy(
                 dtype=float
             )
-            preds_placebo_cal = (
-                a + b * pd.to_numeric(forecasts["y_pred_placebo"], errors="coerce")
-            ).to_numpy(dtype=float)
             forecasts = forecasts.copy()
             forecasts["y_pred_model"] = preds_cal
-            forecasts["y_pred_placebo"] = preds_placebo_cal
+            if ecfg.apply_log_calibration_placebo:
+                preds_placebo_cal = (
+                    a + b * pd.to_numeric(forecasts["y_pred_placebo"], errors="coerce")
+                ).to_numpy(dtype=float)
+                forecasts["y_pred_placebo"] = preds_placebo_cal
             if ecfg.verbose:
                 print(
                     f"[model.evaluate] Applied log calibration from {cal_path} (a={a:.6g}, b={b:.6g})",
@@ -266,7 +300,7 @@ def run_aggregate_test_loss(cfg: ResolvedConfig, *, overwrite: bool) -> None:
 
 
 def run_write_summary_table(cfg: ResolvedConfig, *, overwrite: bool) -> None:
-    """Write processed/summaries/summary_table.csv (GNN vs VIX, multiple sample slices)."""
+    """Write processed/metrics/descriptive/summary_table.csv (GNN vs VIX, multiple sample slices)."""
     out = summary_table_path(cfg)
     out_diag = diagnostics_smoothing_path(cfg)
     if (
@@ -292,6 +326,10 @@ def run_write_summary_table(cfg: ResolvedConfig, *, overwrite: bool) -> None:
         y_pred_har=panel["y_pred_har_log"],
         y_pred_vix=panel["y_pred_vix_log"],
     )
+    if "y_pred_calibrated_vix_log" in panel.columns:
+        merged["y_pred_calibrated_vix"] = panel["y_pred_calibrated_vix_log"]
+    if "y_pred_vix_har_log" in panel.columns:
+        merged["y_pred_vix_har"] = panel["y_pred_vix_har_log"]
     rows = build_summary_table_rows(merged, ecfg)
     if not rows:
         raise ValueError(
@@ -418,6 +456,7 @@ def run_hypothesis_tests_step(cfg: ResolvedConfig, *, overwrite: bool) -> None:
 
 def run_model_evaluate(cfg: ResolvedConfig, *, overwrite: bool) -> None:
     """Run all evaluate steps in order (minimal pipeline)."""
+    ensure_processed_readmes(Path(cfg.processed_dir))
     run_score_splits(cfg, overwrite=overwrite)
     run_write_forecast_panel(cfg, overwrite=overwrite)
     run_aggregate_test_loss(cfg, overwrite=overwrite)

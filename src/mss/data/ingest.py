@@ -57,11 +57,16 @@ def _track(iterable, *, desc: str):
 @dataclass(frozen=True)
 class IngestPaths:
     raw_dir: Path
-    interim_dir: Path
+    prepare_interim_dir: Path
 
     @classmethod
     def from_resolved_config(cls, cfg: ResolvedConfig) -> IngestPaths:
-        return cls(raw_dir=cfg.raw_dir, interim_dir=cfg.interim_dir)
+        return cls(raw_dir=cfg.raw_dir, prepare_interim_dir=cfg.shared_interim_dir)
+
+    @property
+    def interim_dir(self) -> Path:
+        """Shared prepare interim (alias for backward compatibility)."""
+        return self.prepare_interim_dir
 
 
 # ---------------------------------------------------------------------
@@ -301,6 +306,91 @@ def ingest_sp500_returns_to_parquet(paths: IngestPaths, *, overwrite: bool = Fal
 
 
 # ---------------------------------------------------------------------
+# S&P 500 membership (optional robustness universe)
+# ---------------------------------------------------------------------
+
+
+def normalize_sp500_membership(in_path: Path, out_path: Path, *, overwrite: bool = False) -> Path:
+    """
+    Normalize a historical S&P 500 constituent-evolution file into point-in-time spans.
+
+    Optional robustness input; not part of the canonical broad-mcap pipeline. The output parquet has
+    columns ``permno`` (BIGINT), ``start_date`` (DATE), ``end_date`` (DATE, nullable for still-active
+    memberships). Accepts either:
+      - a spans file with a permno column plus start/end columns (common WRDS names supported), or
+      - a (date, permno) membership panel, which is collapsed to one contiguous span per permno.
+    """
+    if not in_path.exists():
+        raise FileNotFoundError(f"Missing S&P 500 membership input: {in_path}")
+    _assert_can_write(out_path, overwrite=overwrite)
+    if out_path.exists() and overwrite:
+        _remove_if_exists(out_path)
+    _safe_mkdir(out_path.parent)
+
+    if in_path.suffix.lower() == ".parquet":
+        df = pd.read_parquet(in_path)
+    else:
+        df = pd.read_csv(in_path)
+    df.columns = normalize_columns_lower(df.columns)
+
+    def _first_present(cands: list[str]) -> str | None:
+        for c in cands:
+            if c in df.columns:
+                return c
+        return None
+
+    permno_col = _first_present(["permno", "lpermno", "co_permno"])
+    if permno_col is None:
+        raise KeyError(
+            f"S&P 500 membership file needs a permno column; got columns {list(df.columns)}"
+        )
+    start_col = _first_present(
+        ["start", "start_date", "from", "from_date", "mbrstartdt", "namedt", "begdt", "start_dt"]
+    )
+    end_col = _first_present(
+        ["end", "end_date", "thru", "through", "to_date", "mbrenddt", "nameenddt", "enddt", "end_dt"]
+    )
+
+    if start_col is not None:
+        out = pd.DataFrame(
+            {
+                "permno": pd.to_numeric(df[permno_col], errors="coerce"),
+                "start_date": pd.to_datetime(df[start_col], errors="coerce").dt.date,
+            }
+        )
+        out["end_date"] = (
+            pd.to_datetime(df[end_col], errors="coerce").dt.date if end_col is not None else pd.NaT
+        )
+    else:
+        date_col = _first_present(["date", "caldt", "trading_date", "observation_date"])
+        if date_col is None:
+            raise KeyError(
+                "S&P 500 membership file needs either start/end span columns or a date column; "
+                f"got columns {list(df.columns)}"
+            )
+        panel = pd.DataFrame(
+            {
+                "permno": pd.to_numeric(df[permno_col], errors="coerce"),
+                "date": pd.to_datetime(df[date_col], errors="coerce"),
+            }
+        ).dropna(subset=["permno", "date"])
+        grouped = panel.groupby("permno")["date"].agg(["min", "max"]).reset_index()
+        out = pd.DataFrame(
+            {
+                "permno": grouped["permno"],
+                "start_date": grouped["min"].dt.date,
+                "end_date": grouped["max"].dt.date,
+            }
+        )
+
+    out = out.dropna(subset=["permno", "start_date"]).copy()
+    out["permno"] = out["permno"].astype("int64")
+    out = out.sort_values(["permno", "start_date"]).reset_index(drop=True)
+    out.to_parquet(out_path, index=False)
+    return out_path
+
+
+# ---------------------------------------------------------------------
 # VIX ingestion
 # ---------------------------------------------------------------------
 
@@ -373,6 +463,18 @@ def ingest_raw_to_parquet(paths: IngestPaths, *, overwrite: bool = False) -> Ing
     crsp_out: CrspIngestOutputs = results["crsp"]
     sp500_out: Sp500IngestOutputs = results["sp500"]
     vix_out: VixIngestOutputs = results["vix"]
+
+    # Optional robustness input: normalize an S&P 500 constituent file if the user provides one.
+    # Never required by the canonical broad-mcap universe.
+    membership_out: Path | None = None
+    for raw_name in ("sp500_membership.csv", "sp500_membership.parquet", "sp500_constituents.csv"):
+        raw_membership = paths.raw_dir / raw_name
+        if raw_membership.exists():
+            membership_out = paths.interim_dir / "sp500_membership.parquet"
+            if not membership_out.exists() or overwrite:
+                normalize_sp500_membership(raw_membership, membership_out, overwrite=overwrite)
+                _progress_line(f"Ingest optional — normalized S&P 500 membership from {raw_name}")
+            break
 
     manifest_path = paths.interim_dir / "ingest_manifest.json"
 

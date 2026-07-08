@@ -11,6 +11,7 @@ def build_returns_panel(
     out_path: Path,
     *,
     use_ret: str = "retx",
+    apply_delisting_adjustment: bool = False,
     common_shares_only: bool = True,
     major_exchanges_only: bool = False,
     min_date: str | None = None,
@@ -56,6 +57,16 @@ def build_returns_panel(
     )
     out_sql = str(out_path.resolve()).replace("\\", "/").replace("'", "''")
 
+    ret_delisted_expr = (
+        "CASE "
+        "WHEN dlstcd IS NOT NULL AND dlret IS NOT NULL "
+        f"THEN (1.0 + {ret_col}) * (1.0 + dlret) - 1.0 "
+        f"ELSE {ret_col} "
+        "END AS ret_delisted"
+        if apply_delisting_adjustment
+        else f"CAST(NULL AS DOUBLE) AS ret_delisted"
+    )
+
     query = f"""
     COPY (
         SELECT DISTINCT
@@ -65,6 +76,7 @@ def build_returns_panel(
             shrcd,
             exchcd,
             {ret_col} AS ret_used,
+            {ret_delisted_expr},
             prc,
             vol,
             shrout,

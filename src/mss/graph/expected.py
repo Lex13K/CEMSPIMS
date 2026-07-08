@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
+from mss.calendar.trading_windows import TradingCalendar
 from mss.graph.config import GraphConfig
 
 
@@ -22,18 +22,8 @@ def compute_expected_feature_dates(
     if not returns_panel_path.is_file():
         raise FileNotFoundError(f"Returns panel not found: {returns_panel_path}")
 
-    con = duckdb.connect(database=":memory:")
-    pq = returns_panel_path.resolve().as_posix().replace("'", "''")
-    con.execute(f"CREATE VIEW returns_panel AS SELECT * FROM read_parquet('{pq}')")
-    all_dates = con.execute("SELECT DISTINCT date FROM returns_panel ORDER BY date").df()["date"]
-    con.close()
-
-    wl = gc.window_length
-    if len(all_dates) <= wl:
-        raise RuntimeError(
-            f"Not enough dates to form a rolling window (have {len(all_dates)}, need > {wl})."
-        )
-    feature_dates = all_dates.iloc[wl - 1 :].reset_index(drop=True)
+    cal = TradingCalendar.from_parquet_date_column(returns_panel_path)
+    feature_dates = cal.feature_dates(gc.window_length)
     dates_df = pd.DataFrame({"date": feature_dates})
 
     if gc.align_feature_dates_with_targets and targets_parquet_path is not None:

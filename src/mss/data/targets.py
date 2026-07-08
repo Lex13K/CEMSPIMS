@@ -62,7 +62,9 @@ def build_targets(
     *,
     vix_parquet_path: Path | None = None,
     horizon: int = 30,
-    trailing_windows: tuple[int, ...] = (30, 252),
+    horizon_cal: int = 30,
+    min_obs_cal: int = 15,
+    trailing_windows: tuple[int, ...] = (5, 30, 252),
     annualization: int = 252,
     scale: float = 100.0,
     include_vix: bool = True,
@@ -70,7 +72,18 @@ def build_targets(
     overwrite: bool = False,
 ) -> Path:
     """
-    Build daily targets: forward realized vol over `horizon` trading days plus lag RV controls.
+    Build daily targets for the v2 baseline.
+
+    Active default target: forward `horizon_cal`-calendar-day realized vol
+    (``rv_fwd_{horizon_cal}cal`` / ``log_rv_fwd_{horizon_cal}cal``). For feature date ``t`` it
+    annualizes S&P trading returns in the calendar window ``(t, t + horizon_cal days]`` by the
+    actual number of trading observations ``N_t``: ``scale * sqrt((annualization / N_t) * sum(r^2))``.
+    Rows with fewer than ``min_obs_cal`` forward observations, or whose forward window is truncated by
+    the end of the sample, are NULL.
+
+    Legacy/robustness target: forward `horizon`-trading-day realized vol
+    (``rv_fwd_{horizon}`` / ``log_rv_fwd_{horizon}``) is retained for comparison but is not the
+    default ``target_column``.
 
     Inputs:
       - sp500_parquet_path: parquet with columns date, sprtrn (from ingest).
@@ -82,6 +95,10 @@ def build_targets(
     """
     if horizon <= 0:
         raise ValueError("horizon must be positive")
+    if horizon_cal <= 0:
+        raise ValueError("horizon_cal must be positive")
+    if min_obs_cal <= 0:
+        raise ValueError("min_obs_cal must be positive")
     if any(w <= 0 for w in trailing_windows):
         raise ValueError("All trailing_windows must be positive")
     if annualization <= 0:
@@ -123,9 +140,24 @@ def build_targets(
         f"ELSE NULL END"
     )
 
+    # Active default target: forward realized vol over the calendar window (t, t+horizon_cal days],
+    # annualized by the actual trading-observation count N_t. NULL when the window is short on
+    # observations or truncated by the end of the sample.
+    cal_frame = f"RANGE BETWEEN INTERVAL 1 DAY FOLLOWING AND INTERVAL {horizon_cal} DAY FOLLOWING"
+    cal_sum = f"SUM(sprtrn * sprtrn) OVER (ORDER BY date {cal_frame})"
+    cal_cnt = f"COUNT(sprtrn) OVER (ORDER BY date {cal_frame})"
+    cal_complete = f"date <= (MAX(date) OVER () - INTERVAL {horizon_cal} DAY)"
+    cal_rv_expr = (
+        f"CASE WHEN {cal_cnt} >= {min_obs_cal} AND {cal_complete} "
+        f"THEN SQRT(({annualization}::DOUBLE / {cal_cnt}::DOUBLE) * {cal_sum}) * {scale} "
+        f"ELSE NULL END"
+    )
+
     base_cols: list[str] = [
         "date",
         "sprtrn",
+        f"{cal_rv_expr} AS rv_fwd_{horizon_cal}cal",
+        f"{cal_cnt} AS n_fwd_{horizon_cal}cal_obs",
         f"{fwd_rv_expr} AS rv_fwd_{horizon}",
         f"{fwd_cnt} AS n_fwd_{horizon}_obs",
     ]
@@ -146,7 +178,9 @@ def build_targets(
 
     if include_log:
         log_cols: list[str] = [
-            f"CASE WHEN rv_fwd_{horizon} > 0 THEN LN(rv_fwd_{horizon}) ELSE NULL END AS log_rv_fwd_{horizon}"
+            f"CASE WHEN rv_fwd_{horizon_cal}cal > 0 THEN LN(rv_fwd_{horizon_cal}cal) "
+            f"ELSE NULL END AS log_rv_fwd_{horizon_cal}cal",
+            f"CASE WHEN rv_fwd_{horizon} > 0 THEN LN(rv_fwd_{horizon}) ELSE NULL END AS log_rv_fwd_{horizon}",
         ]
         for w in trailing_windows:
             log_cols.append(
@@ -213,6 +247,7 @@ def build_targets(
             COUNT(*) AS n_rows,
             MIN(date) AS min_date,
             MAX(date) AS max_date,
+            SUM(CASE WHEN rv_fwd_{horizon_cal}cal IS NULL THEN 1 ELSE 0 END) AS n_missing_rv_fwd_cal,
             SUM(CASE WHEN rv_fwd_{horizon} IS NULL THEN 1 ELSE 0 END) AS n_missing_rv_fwd
         FROM read_parquet('{out_sql}')
         """
@@ -229,11 +264,14 @@ def build_targets(
         },
         "parameters": {
             "horizon": horizon,
+            "horizon_cal": horizon_cal,
+            "min_obs_cal": min_obs_cal,
             "trailing_windows": list(trailing_windows),
             "annualization": annualization,
             "scale": scale,
             "include_vix": include_vix,
             "include_log": include_log,
+            "default_target_column": f"log_rv_fwd_{horizon_cal}cal",
         },
         "outputs": {
             "targets_path": str(out_path),
@@ -244,6 +282,9 @@ def build_targets(
             "n_rows": int(stats_row["n_rows"]) if stats_row.get("n_rows") is not None else None,
             "min_date": str(stats_row["min_date"]) if stats_row.get("min_date") is not None else None,
             "max_date": str(stats_row["max_date"]) if stats_row.get("max_date") is not None else None,
+            "n_missing_rv_fwd_cal": int(stats_row["n_missing_rv_fwd_cal"])
+            if stats_row.get("n_missing_rv_fwd_cal") is not None
+            else None,
             "n_missing_rv_fwd": int(stats_row["n_missing_rv_fwd"])
             if stats_row.get("n_missing_rv_fwd") is not None
             else None,
@@ -262,16 +303,24 @@ def check_targets(
     targets_path: Path,
     *,
     horizon: int = 30,
+    horizon_cal: int = 30,
     expect_vix_column: bool = True,
+    expect_calendar_target: bool = True,
 ) -> dict[str, Any]:
     """
     Validate targets.parquet against docs/data_contracts.md (required columns, keys, basic numeric integrity).
+
+    The active default target ``log_rv_fwd_{horizon_cal}cal`` is required when
+    ``expect_calendar_target`` is True; the legacy trading-day target ``log_rv_fwd_{horizon}`` is
+    always required for robustness comparisons.
     """
     if not targets_path.is_file():
         raise FileNotFoundError(f"Missing targets table: {targets_path}")
 
     rv_fwd = f"rv_fwd_{horizon}"
     log_rv_fwd = f"log_rv_fwd_{horizon}"
+    rv_fwd_cal = f"rv_fwd_{horizon_cal}cal"
+    log_rv_fwd_cal = f"log_rv_fwd_{horizon_cal}cal"
 
     con = duckdb.connect(database=":memory:")
     p = str(targets_path.resolve()).replace("\\", "/").replace("'", "''")
@@ -280,6 +329,8 @@ def check_targets(
     col_names = [str(c).lower() for c in cols_df["column_name"].tolist()]
 
     required = ["date", rv_fwd.lower(), log_rv_fwd.lower()]
+    if expect_calendar_target:
+        required += [rv_fwd_cal.lower(), log_rv_fwd_cal.lower()]
     missing = [c for c in required if c not in col_names]
     if missing:
         con.close()
@@ -318,15 +369,29 @@ def check_targets(
 
     n_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{p}')").fetchone()[0]
 
-    bad_log = con.execute(
-        f"""
-        SELECT COUNT(*) AS n
-        FROM read_parquet('{p}')
-        WHERE "{log_rv_fwd}" IS NOT NULL
-          AND NOT isfinite("{log_rv_fwd}")
-        """
-    ).fetchone()[0]
+    log_cols_to_check = [log_rv_fwd]
+    if expect_calendar_target and log_rv_fwd_cal.lower() in col_names:
+        log_cols_to_check.append(log_rv_fwd_cal)
+    bad_log = 0
+    bad_log_cols: list[str] = []
+    for lc in log_cols_to_check:
+        n_bad = con.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM read_parquet('{p}')
+            WHERE "{lc}" IS NOT NULL
+              AND NOT isfinite("{lc}")
+            """
+        ).fetchone()[0]
+        if int(n_bad) != 0:
+            bad_log += int(n_bad)
+            bad_log_cols.append(f"{lc}={int(n_bad)}")
 
+    cal_summary_cols = ""
+    if expect_calendar_target and rv_fwd_cal.lower() in col_names:
+        cal_summary_cols = (
+            f', SUM(CASE WHEN "{rv_fwd_cal}" IS NULL THEN 1 ELSE 0 END) AS n_null_rv_fwd_cal'
+        )
     summary = con.execute(
         f"""
         SELECT
@@ -334,7 +399,7 @@ def check_targets(
             MIN(date) AS min_date,
             MAX(date) AS max_date,
             SUM(CASE WHEN "{rv_fwd}" IS NULL THEN 1 ELSE 0 END) AS n_null_rv_fwd,
-            SUM(CASE WHEN "{log_rv_fwd}" IS NULL THEN 1 ELSE 0 END) AS n_null_log_rv_fwd
+            SUM(CASE WHEN "{log_rv_fwd}" IS NULL THEN 1 ELSE 0 END) AS n_null_log_rv_fwd{cal_summary_cols}
         FROM read_parquet('{p}')
         """
     ).fetchdf()
@@ -354,7 +419,7 @@ def check_targets(
     if int(order_check) != 0:
         issues.append("date column not strictly increasing")
     if int(bad_log) != 0:
-        issues.append(f"non-finite {log_rv_fwd} where non-null: {int(bad_log)} rows")
+        issues.append(f"non-finite log target(s) where non-null: {', '.join(bad_log_cols)}")
 
     return {
         "passed": passed,

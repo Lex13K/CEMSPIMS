@@ -10,10 +10,13 @@ from mss.analysis.figures import (
     run_build_summary_barplot,
 )
 from mss.io.config import ResolvedConfig
+from mss.processed.readmes import ensure_processed_readmes
+from pathlib import Path
 
 
 def run_summarize_loss_figure(cfg: ResolvedConfig, *, overwrite: bool) -> None:
     """Summarize step: forecast comparison figures, then loss-over-epochs figure."""
+    ensure_processed_readmes(Path(cfg.processed_dir))
     run_build_forecast_comparison_figures(cfg, overwrite=overwrite)
     run_build_loss_figure(cfg, overwrite=overwrite)
     run_build_summary_barplot(cfg, overwrite=overwrite)

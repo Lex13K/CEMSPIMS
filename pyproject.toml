@@ -24,6 +24,12 @@ train = [
     "torch>=2.2.0",
     "torch-geometric>=2.5.0",
 ]
+app = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+    "httpx>=0.27.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -11,50 +11,56 @@ import pandas as pd
 
 from mss.io.config import ResolvedConfig
 from mss.model_train.loss_ids import ALLOWED_TRAINING_LOSS_IDS
+from mss.processed.paths import (
+    DIAGNOSTICS_SMOOTHING_FILENAME,
+    FORECAST_PANEL_FILENAME,
+    FORECASTS_FILENAME,
+    HYPOTHESIS_TESTS_FILENAME,
+    REGRESSION_INCREMENTAL_FILENAME,
+    REGRESSION_MZ_GNN_FILENAME,
+    SUMMARY_TABLE_FILENAME,
+    TEST_LOSS_FILENAME,
+    diagnostics_smoothing_path,
+    forecast_panel_path,
+    forecasts_path,
+    hypothesis_tests_path,
+    regression_incremental_path,
+    regression_mz_gnn_path,
+    summary_table_path,
+    test_loss_path,
+)
 
-
-FORECASTS_FILENAME = "forecasts.parquet"
-FORECAST_PANEL_FILENAME = "forecast_panel.parquet"
-TEST_LOSS_FILENAME = "test_loss.json"
-SUMMARIES_DIR = "summaries"
-SUMMARY_TABLE_FILENAME = "summary_table.csv"
-HYPOTHESIS_TESTS_FILENAME = "hypothesis_tests.csv"
-REGRESSION_MZ_GNN_FILENAME = "regression_mz_gnn.csv"
-REGRESSION_INCREMENTAL_FILENAME = "regression_incremental.csv"
-DIAGNOSTICS_SMOOTHING_FILENAME = "diagnostics_smoothing.csv"
-
-
-def forecasts_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / FORECASTS_FILENAME
-
-
-def test_loss_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / TEST_LOSS_FILENAME
-
-
-def summary_table_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / SUMMARIES_DIR / SUMMARY_TABLE_FILENAME
-
-
-def forecast_panel_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / FORECAST_PANEL_FILENAME
-
-
-def hypothesis_tests_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / SUMMARIES_DIR / HYPOTHESIS_TESTS_FILENAME
-
-
-def regression_mz_gnn_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / SUMMARIES_DIR / REGRESSION_MZ_GNN_FILENAME
-
-
-def regression_incremental_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / SUMMARIES_DIR / REGRESSION_INCREMENTAL_FILENAME
-
-
-def diagnostics_smoothing_path(cfg: ResolvedConfig) -> Path:
-    return Path(cfg.processed_dir) / SUMMARIES_DIR / DIAGNOSTICS_SMOOTHING_FILENAME
-
+__all__ = [
+    "FORECASTS_FILENAME",
+    "FORECAST_PANEL_FILENAME",
+    "TEST_LOSS_FILENAME",
+    "SUMMARY_TABLE_FILENAME",
+    "HYPOTHESIS_TESTS_FILENAME",
+    "REGRESSION_MZ_GNN_FILENAME",
+    "REGRESSION_INCREMENTAL_FILENAME",
+    "DIAGNOSTICS_SMOOTHING_FILENAME",
+    "forecasts_path",
+    "test_loss_path",
+    "summary_table_path",
+    "forecast_panel_path",
+    "hypothesis_tests_path",
+    "regression_mz_gnn_path",
+    "regression_incremental_path",
+    "diagnostics_smoothing_path",
+    "check_forecast_panel",
+    "check_hypothesis_tests",
+    "check_forecasts",
+    "check_test_loss",
+    "check_summary_table",
+    "check_diagnostics_smoothing",
+    "model_evaluate_score_splits_semantically_complete",
+    "model_evaluate_write_forecast_panel_semantically_complete",
+    "model_evaluate_aggregate_test_loss_semantically_complete",
+    "model_evaluate_write_summary_table_semantically_complete",
+    "model_evaluate_run_hypothesis_tests_semantically_complete",
+    "model_evaluate_pipeline_semantically_complete",
+    "model_evaluate_step_semantically_complete",
+]
 
 _FORECAST_PANEL_REQUIRED = (
     "date",
@@ -70,10 +76,72 @@ _FORECAST_PANEL_REQUIRED = (
     "qlike_gnn_t",
     "qlike_vix_t",
     "d_qlike_t",
+    "d_qlike_placebo_t",
     "mse_log_gnn_t",
     "mse_log_vix_t",
     "d_mse_log_t",
+    "d_mse_log_placebo_t",
 )
+
+
+_FORECAST_PANEL_HAR_OPTIONAL = (
+    "y_pred_har_log",
+    "y_pred_har_level",
+    "qlike_har_t",
+    "mse_log_har_t",
+)
+
+_FORECAST_PANEL_BENCHMARK_DIFF_OPTIONAL = (
+    "d_qlike_calibrated_vix_t",
+    "d_mse_log_calibrated_vix_t",
+    "d_qlike_vix_har_t",
+    "d_mse_log_vix_har_t",
+    "d_qlike_har_t",
+    "d_mse_log_har_t",
+)
+
+# v2 benchmarks: like HAR, fit/regression-based predictions may be NaN on early train rows lacking
+# lag history, but must be finite on val/test where formal inference runs.
+_FORECAST_PANEL_BENCHMARK_OPTIONAL = (
+    "y_pred_calibrated_vix_log",
+    "y_pred_calibrated_vix_level",
+    "qlike_calibrated_vix_t",
+    "mse_log_calibrated_vix_t",
+    "y_pred_vix_har_log",
+    "y_pred_vix_har_level",
+    "qlike_vix_har_t",
+    "mse_log_vix_har_t",
+)
+
+
+def _check_eval_finite_columns(
+    df: pd.DataFrame, candidate_cols: tuple[str, ...], *, sentinel: str
+) -> list[str]:
+    """Benchmark preds may be NaN on early train rows but must be finite on val/test."""
+    issues: list[str] = []
+    cols = [c for c in candidate_cols if c in df.columns]
+    if not cols:
+        return issues
+    if sentinel in df.columns:
+        all_vals = pd.to_numeric(df[sentinel], errors="coerce").to_numpy(dtype=float)
+        if not np.isfinite(all_vals).any():
+            issues.append(f"no finite {sentinel} values")
+    eval_mask = df["split"].astype(str).isin(("val", "test")).to_numpy()
+    if not eval_mask.any():
+        return issues
+    for c in cols:
+        vals = pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float)
+        ev = vals[eval_mask]
+        if np.isnan(ev).any() or not np.isfinite(ev).all():
+            issues.append(f"non-finite values in {c} on val/test splits")
+    return issues
+
+
+def _check_har_benchmark_columns(df: pd.DataFrame) -> list[str]:
+    """HAR preds need 252-day lag history; early train rows may legitimately be NaN."""
+    return _check_eval_finite_columns(
+        df, _FORECAST_PANEL_HAR_OPTIONAL, sentinel="y_pred_har_log"
+    )
 
 
 def check_forecast_panel(path: Path) -> dict[str, Any]:
@@ -108,6 +176,8 @@ def check_forecast_panel(path: Path) -> dict[str, Any]:
         "y_pred_vix_level",
         "d_qlike_t",
         "d_mse_log_t",
+        "d_qlike_placebo_t",
+        "d_mse_log_placebo_t",
     ):
         vals = pd.to_numeric(df[c], errors="coerce").to_numpy()
         if np.isnan(vals).any() or not np.isfinite(vals).all():
@@ -115,18 +185,25 @@ def check_forecast_panel(path: Path) -> dict[str, Any]:
     for c in (
         "y_pred_placebo_log",
         "y_pred_placebo_level",
-        "y_pred_har_log",
-        "y_pred_har_level",
         "qlike_placebo_t",
-        "qlike_har_t",
         "mse_log_placebo_t",
-        "mse_log_har_t",
     ):
         if c not in df.columns:
             continue
         vals = pd.to_numeric(df[c], errors="coerce").to_numpy()
         if np.isnan(vals).any() or not np.isfinite(vals).all():
             out["issues"].append(f"non-finite values in {c}")
+    out["issues"].extend(_check_har_benchmark_columns(df))
+    out["issues"].extend(
+        _check_eval_finite_columns(
+            df, _FORECAST_PANEL_BENCHMARK_OPTIONAL, sentinel="y_pred_vix_har_log"
+        )
+    )
+    out["issues"].extend(
+        _check_eval_finite_columns(
+            df, _FORECAST_PANEL_BENCHMARK_DIFF_OPTIONAL, sentinel="d_qlike_vix_har_t"
+        )
+    )
     out["passed"] = len(out["issues"]) == 0
     return out
 
@@ -139,6 +216,7 @@ _HYPOTHESIS_TESTS_REQUIRED = (
     "alternative",
     "test_name",
     "sample",
+    "benchmark",
     "coefficient_tested",
     "test_scope",
     "joint_hypothesis",
@@ -364,4 +442,3 @@ def model_evaluate_pipeline_semantically_complete(cfg: ResolvedConfig) -> bool:
 def model_evaluate_step_semantically_complete(cfg: ResolvedConfig) -> bool:
     """Alias for `model_evaluate_pipeline_semantically_complete` (same predicate)."""
     return model_evaluate_pipeline_semantically_complete(cfg)
-

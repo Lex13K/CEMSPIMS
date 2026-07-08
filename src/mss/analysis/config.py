@@ -17,15 +17,6 @@ class AnalysisSummarizeConfig:
 
 
 @dataclass(frozen=True)
-class AnalysisReportConfig:
-    """Settings for standalone `report.py` helpers (not used by the orchestrator)."""
-
-    bootstrap_reps: int
-    include_h1: bool
-    verbose: bool
-
-
-@dataclass(frozen=True)
 class AnalysisFiguresConfig:
     """Settings for standalone figure helpers outside `analysis.summarize` (if used)."""
 
@@ -43,16 +34,6 @@ def load_analysis_summarize_config(config_path: Path) -> AnalysisSummarizeConfig
     )
 
 
-def load_analysis_report_config(config_path: Path) -> AnalysisReportConfig:
-    sm = load_analysis_summarize_config(config_path)
-    return AnalysisReportConfig(
-        bootstrap_reps=499,
-        include_h1=False,
-        verbose=sm.verbose,
-    )
-
-
 def load_analysis_figures_config(config_path: Path) -> AnalysisFiguresConfig:
     sm = load_analysis_summarize_config(config_path)
     return AnalysisFiguresConfig(dpi=sm.dpi, verbose=sm.verbose)
-

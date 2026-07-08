@@ -12,13 +12,18 @@ from pathlib import Path
 from mss.data.ingest import IngestPaths
 from mss.io.config import ResolvedConfig
 from mss.pipeline import completeness as _complete
+from mss.run.paths import graphs_dir
 
 
 def _crsp_has_at_least_one_parquet(cfg: ResolvedConfig) -> bool:
-    crsp = IngestPaths.from_resolved_config(cfg).interim_dir / "crsp_parquet"
+    crsp = cfg.shared_interim_dir / "crsp_parquet"
     if not crsp.is_dir():
         return False
     return any(crsp.rglob("*.parquet"))
+
+
+def _graphs_dir(cfg: ResolvedConfig) -> Path:
+    return graphs_dir(cfg)
 
 
 def ingest_step_complete(cfg: ResolvedConfig) -> bool:
@@ -31,10 +36,6 @@ def returns_panel_step_complete(cfg: ResolvedConfig) -> bool:
 
 def targets_step_complete(cfg: ResolvedConfig) -> bool:
     return _complete.targets_step_semantically_complete(cfg)
-
-
-def _graphs_dir(cfg: ResolvedConfig) -> Path:
-    return IngestPaths.from_resolved_config(cfg).interim_dir / "graphs"
 
 
 def feature_dates_step_complete(cfg: ResolvedConfig) -> bool:
@@ -105,6 +106,100 @@ def thesis_export_step_complete(cfg: ResolvedConfig) -> bool:
     return _complete.thesis_export_semantically_complete(cfg)
 
 
+def compare_runs_build_step_complete(cfg: ResolvedConfig) -> bool:
+    return _complete.analysis_compare_runs_semantically_complete(cfg)
+
+
+def _step_semantic_only(pipeline: str, step_id: str, cfg: ResolvedConfig) -> bool:
+    if pipeline == "graph.prepare":
+        if step_id == "feature_dates":
+            return _complete.feature_dates_step_semantic_only(cfg)
+        if step_id == "universe":
+            return _complete.universe_step_semantic_only(cfg)
+        if step_id == "node_features":
+            return _complete.node_features_step_semantic_only(cfg)
+        if step_id == "edges":
+            return _complete.edges_step_semantic_only(cfg)
+    if pipeline == "dataset.package":
+        if step_id == "splits":
+            return _complete.dataset_splits_step_semantic_only(cfg)
+        if step_id == "scaler":
+            return _complete.dataset_scaler_step_semantic_only(cfg)
+        if step_id == "manifest":
+            return _complete.dataset_manifest_step_semantic_only(cfg)
+    if pipeline == "model.train" and step_id == "train":
+        from mss.model_train.checks import model_train_step_semantic_only
+
+        return model_train_step_semantic_only(cfg)
+    if pipeline == "model.cache_graphs" and step_id == "materialize":
+        return _complete.model_cache_graphs_step_semantic_only(cfg)
+    if pipeline == "model.evaluate":
+        if step_id == "score_splits":
+            return _complete.model_evaluate_score_splits_semantic_only(cfg)
+        if step_id == "write_forecast_panel":
+            return _complete.model_evaluate_write_forecast_panel_semantic_only(cfg)
+        if step_id == "aggregate_test_loss":
+            return _complete.model_evaluate_aggregate_test_loss_semantic_only(cfg)
+        if step_id == "write_summary_table":
+            return _complete.model_evaluate_write_summary_table_semantic_only(cfg)
+        if step_id == "run_hypothesis_tests":
+            return _complete.model_evaluate_run_hypothesis_tests_semantic_only(cfg)
+    return False
+
+
+def step_stale_reason(pipeline: str, step_id: str, cfg: ResolvedConfig) -> str | None:
+    """Human-readable reason when artifacts exist but config fingerprint is stale."""
+    if step_is_complete(pipeline, step_id, cfg):
+        return None
+    if not _step_semantic_only(pipeline, step_id, cfg):
+        return None
+
+    from mss.config.fingerprints import (
+        dataset_fingerprint_matches,
+        dataset_fingerprint_path,
+        evaluate_fingerprint_matches,
+        evaluate_fingerprint_path,
+        graph_fingerprint_matches,
+        graph_fingerprint_path,
+        read_fingerprint_sidecar,
+        train_fingerprint_matches,
+    )
+    from mss.model_train.checks import final_metrics_path
+
+    if pipeline == "graph.prepare":
+        if read_fingerprint_sidecar(graph_fingerprint_path(cfg)) is None:
+            return None
+        if not graph_fingerprint_matches(cfg):
+            return "config fingerprint changed for [graph]"
+    elif pipeline == "dataset.package":
+        if read_fingerprint_sidecar(dataset_fingerprint_path(cfg)) is None:
+            return None
+        if not dataset_fingerprint_matches(cfg):
+            return "config fingerprint changed for [dataset]"
+    elif pipeline == "model.train" and step_id == "train":
+        if not graph_fingerprint_matches(cfg):
+            if read_fingerprint_sidecar(graph_fingerprint_path(cfg)) is not None:
+                return "upstream [graph] config changed since last train"
+        if not dataset_fingerprint_matches(cfg):
+            if read_fingerprint_sidecar(dataset_fingerprint_path(cfg)) is not None:
+                return "upstream [dataset] config changed since last train"
+        if final_metrics_path(cfg).is_file() and not train_fingerprint_matches(cfg):
+            return "config fingerprint changed for [model.train]"
+    elif pipeline == "model.cache_graphs":
+        if read_fingerprint_sidecar(graph_fingerprint_path(cfg)) is not None and not graph_fingerprint_matches(cfg):
+            return "upstream [graph] config changed since graph cache built"
+        if read_fingerprint_sidecar(dataset_fingerprint_path(cfg)) is not None and not dataset_fingerprint_matches(cfg):
+            return "upstream [dataset] config changed since graph cache built"
+    elif pipeline == "model.evaluate":
+        if final_metrics_path(cfg).is_file() and not train_fingerprint_matches(cfg):
+            return "upstream [model.train] changed since last evaluate"
+        if read_fingerprint_sidecar(evaluate_fingerprint_path(cfg)) is None:
+            return None
+        if not evaluate_fingerprint_matches(cfg):
+            return "config fingerprint changed for [model.evaluate]"
+    return None
+
+
 def step_is_complete(pipeline: str, step_id: str, cfg: ResolvedConfig) -> bool:
     """Return True if this step's outputs are present (skip re-run when not overwriting)."""
     if pipeline == "data.prepare":
@@ -161,6 +256,10 @@ def step_is_complete(pipeline: str, step_id: str, cfg: ResolvedConfig) -> bool:
         if step_id == "build":
             return thesis_export_step_complete(cfg)
         return False
+    if pipeline == "analysis.compare_runs":
+        if step_id == "build":
+            return compare_runs_build_step_complete(cfg)
+        return False
     return False
 
 
@@ -170,59 +269,60 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
     Raises ValueError with a clear message if not.
     """
     paths = IngestPaths.from_resolved_config(cfg)
-    interim = paths.interim_dir
+    shared = paths.prepare_interim_dir
+    run_interim = cfg.run_interim_dir
 
     if pipeline == "data.prepare":
         if step_id == "returns_panel":
             if not _crsp_has_at_least_one_parquet(cfg):
                 raise ValueError(
-                    "returns_panel needs CRSP parquet shards under interim/crsp_parquet/. "
+                    "returns_panel needs CRSP parquet shards under shared interim/crsp_parquet/. "
                     "Run ingest first or use --overwrite data.prepare."
                 )
         if step_id == "targets":
-            if not (interim / "sp500_returns.parquet").is_file() or not (interim / "vix.parquet").is_file():
+            if not (shared / "sp500_returns.parquet").is_file() or not (shared / "vix.parquet").is_file():
                 raise ValueError(
-                    "targets needs interim/sp500_returns.parquet and interim/vix.parquet. "
+                    "targets needs shared interim sp500_returns.parquet and vix.parquet. "
                     "Run ingest first or use --overwrite data.prepare."
                 )
         return
 
     if pipeline == "graph.prepare":
         if step_id == "feature_dates":
-            if not (interim / "returns_panel.parquet").is_file():
+            if not (shared / "returns_panel.parquet").is_file():
                 raise ValueError(
-                    "feature_dates needs interim/returns_panel.parquet. "
+                    "feature_dates needs shared interim/returns_panel.parquet. "
                     "Run data.prepare through returns_panel or use --overwrite graph.prepare."
                 )
-            if not (interim / "targets.parquet").is_file():
+            if not (shared / "targets.parquet").is_file():
                 raise ValueError(
-                    "feature_dates needs interim/targets.parquet. "
+                    "feature_dates needs shared interim/targets.parquet. "
                     "Run data.prepare through targets or use --overwrite graph.prepare."
                 )
         elif step_id == "universe":
-            if not (interim / "stage04_dates.parquet").is_file():
+            if not (run_interim / "stage04_dates.parquet").is_file():
                 raise ValueError(
-                    "universe needs interim/stage04_dates.parquet. "
+                    "universe needs run interim/stage04_dates.parquet. "
                     "Run graph.prepare step feature_dates or use --overwrite graph.prepare."
                 )
-            if not (interim / "returns_panel.parquet").is_file():
-                raise ValueError("universe needs interim/returns_panel.parquet.")
+            if not (shared / "returns_panel.parquet").is_file():
+                raise ValueError("universe needs shared interim/returns_panel.parquet.")
         elif step_id == "node_features":
             if not (_graphs_dir(cfg) / "universe.parquet").is_file():
                 raise ValueError(
-                    "node_features needs interim/graphs/universe.parquet. "
+                    "node_features needs run interim/graphs/universe.parquet. "
                     "Run graph.prepare through universe or use --overwrite graph.prepare."
                 )
-            if not (interim / "returns_panel.parquet").is_file():
-                raise ValueError("node_features needs interim/returns_panel.parquet.")
+            if not (shared / "returns_panel.parquet").is_file():
+                raise ValueError("node_features needs shared interim/returns_panel.parquet.")
         elif step_id == "edges":
             if not (_graphs_dir(cfg) / "universe.parquet").is_file():
                 raise ValueError(
-                    "edges needs interim/graphs/universe.parquet. "
+                    "edges needs run interim/graphs/universe.parquet. "
                     "Run graph.prepare through universe or use --overwrite graph.prepare."
                 )
-            if not (interim / "returns_panel.parquet").is_file():
-                raise ValueError("edges needs interim/returns_panel.parquet.")
+            if not (shared / "returns_panel.parquet").is_file():
+                raise ValueError("edges needs shared interim/returns_panel.parquet.")
         return
 
     if pipeline == "dataset.package":
@@ -230,35 +330,35 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
         if step_id == "splits":
             if not (gdir / "universe.parquet").is_file():
                 raise ValueError(
-                    "dataset.package splits needs interim/graphs/universe.parquet. "
+                    "dataset.package splits needs run interim/graphs/universe.parquet. "
                     "Run graph.prepare through universe or use --overwrite graph.prepare."
                 )
         elif step_id == "scaler":
-            if not (interim / "dataset" / "splits.parquet").is_file():
+            if not (run_interim / "dataset" / "splits.parquet").is_file():
                 raise ValueError(
-                    "dataset.package scaler needs interim/dataset/splits.parquet. "
+                    "dataset.package scaler needs run interim/dataset/splits.parquet. "
                     "Run dataset.package step splits or use --overwrite dataset.package."
                 )
             if not (gdir / "node_features.parquet").is_file():
                 raise ValueError(
-                    "dataset.package scaler needs interim/graphs/node_features.parquet. "
+                    "dataset.package scaler needs run interim/graphs/node_features.parquet. "
                     "Run graph.prepare through node_features or use --overwrite graph.prepare."
                 )
         elif step_id == "manifest":
-            if not (interim / "dataset" / "splits.parquet").is_file():
+            if not (run_interim / "dataset" / "splits.parquet").is_file():
                 raise ValueError(
-                    "dataset.package manifest needs interim/dataset/splits.parquet. "
+                    "dataset.package manifest needs run interim/dataset/splits.parquet. "
                     "Run dataset.package through scaler or use --overwrite dataset.package."
                 )
-            if not (interim / "dataset" / "scaler_params.json").is_file():
+            if not (run_interim / "dataset" / "scaler_params.json").is_file():
                 raise ValueError(
-                    "dataset.package manifest needs interim/dataset/scaler_params.json."
+                    "dataset.package manifest needs run interim/dataset/scaler_params.json."
                 )
             for rel, msg in (
                 (gdir / "node_features.parquet", "node_features"),
                 (gdir / "edges.parquet", "edges"),
                 (gdir / "universe.parquet", "universe"),
-                (interim / "targets.parquet", "targets"),
+                (shared / "targets.parquet", "targets"),
             ):
                 if not rel.is_file():
                     raise ValueError(
@@ -269,7 +369,7 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
 
     if pipeline == "model.train":
         if step_id == "train":
-            man = interim / "dataset" / "manifest.json"
+            man = run_interim / "dataset" / "manifest.json"
             if not man.is_file():
                 raise ValueError(
                     "model.train needs interim/dataset/manifest.json. "
@@ -287,7 +387,7 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
 
     if pipeline == "model.cache_graphs":
         if step_id == "materialize":
-            man = interim / "dataset" / "manifest.json"
+            man = run_interim / "dataset" / "manifest.json"
             if not man.is_file():
                 raise ValueError(
                     "model.cache_graphs needs interim/dataset/manifest.json. "
@@ -305,7 +405,7 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
 
     if pipeline == "model.evaluate":
         if step_id == "score_splits":
-            man = interim / "dataset" / "manifest.json"
+            man = run_interim / "dataset" / "manifest.json"
             if not man.is_file():
                 raise ValueError(
                     "model.evaluate needs interim/dataset/manifest.json. "
@@ -386,7 +486,7 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
                 raise ValueError(
                     "model.evaluate write_summary_table needs valid processed/test_loss.json."
                 )
-            man = interim / "dataset" / "manifest.json"
+            man = run_interim / "dataset" / "manifest.json"
             if not man.is_file():
                 raise ValueError(
                     "model.evaluate write_summary_table needs interim/dataset/manifest.json."
@@ -435,11 +535,11 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
             st = summary_table_path(cfg)
             if not check_summary_table(st).get("passed"):
                 raise ValueError(
-                    "analysis.summarize loss_figure needs processed/summaries/summary_table.csv "
+                    "analysis.summarize loss_figure needs processed/metrics/descriptive/summary_table.csv "
                     "(run model.evaluate write_summary_table first)."
                 )
 
-            universe_path = interim / "graphs" / "universe.parquet"
+            universe_path = run_interim / "graphs" / "universe.parquet"
             if not universe_path.is_file():
                 raise ValueError(
                     "analysis.summarize loss_figure needs interim/graphs/universe.parquet "
@@ -456,7 +556,7 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
                 htp = hypothesis_tests_path(cfg)
                 if not check_hypothesis_tests(htp).get("passed"):
                     raise ValueError(
-                        "analysis.summarize loss_figure needs processed/summaries/hypothesis_tests.csv "
+                        "analysis.summarize loss_figure needs processed/metrics/formal/hypothesis_tests.csv "
                         "(run model.evaluate run_hypothesis_tests first), or set "
                         "[analysis.summarize] draw_hypothesis_table = false."
                     )
@@ -464,24 +564,94 @@ def ensure_step_inputs_ready(pipeline: str, step_id: str, cfg: ResolvedConfig) -
 
     if pipeline == "thesis.export":
         if step_id == "build":
-            req_files = (
-                "summaries/summary_table.csv",
-                "summaries/hypothesis_tests.csv",
-                "summaries/diagnostics_smoothing.csv",
-                "summaries/regression_incremental.csv",
-                "summaries/regression_mz_gnn.csv",
-                "summaries/universe_churn_summary.csv",
-                "figures/target_vs_model_vix/target_vs_model_vix_test.png",
-                "figures/universe_churn/universe_turnover_timeseries.png",
-                "figures/universe_churn/universe_rankbucket_replacement_heatmap.png",
-                "figures/universe_churn/universe_tenure_distribution.png",
+            from mss.processed.paths import (
+                DIAGNOSTICS_SMOOTHING_FILENAME,
+                HYPOTHESIS_TESTS_FILENAME,
+                REGRESSION_INCREMENTAL_FILENAME,
+                REGRESSION_MZ_GNN_FILENAME,
+                SUMMARY_TABLE_FILENAME,
+                UNIVERSE_CHURN_SUMMARY_CSV,
+                forecast_comparison_path,
+                figures_diagnostics_dir,
+                metrics_descriptive_dir,
+                metrics_formal_dir,
+                metrics_universe_dir,
+                universe_rankbucket_replacement_heatmap_path,
+                universe_tenure_distribution_path,
+                universe_turnover_timeseries_path,
             )
-            for rel in req_files:
-                p = Path(cfg.processed_dir) / rel
+
+            proc = Path(cfg.processed_dir)
+            req_paths = [
+                metrics_descriptive_dir(proc) / SUMMARY_TABLE_FILENAME,
+                metrics_formal_dir(proc) / HYPOTHESIS_TESTS_FILENAME,
+                metrics_descriptive_dir(proc) / DIAGNOSTICS_SMOOTHING_FILENAME,
+                metrics_formal_dir(proc) / REGRESSION_INCREMENTAL_FILENAME,
+                metrics_formal_dir(proc) / REGRESSION_MZ_GNN_FILENAME,
+                metrics_universe_dir(proc) / UNIVERSE_CHURN_SUMMARY_CSV,
+                forecast_comparison_path(proc, "test"),
+                universe_turnover_timeseries_path(proc),
+                universe_rankbucket_replacement_heatmap_path(proc),
+                universe_tenure_distribution_path(proc),
+            ]
+            for p in req_paths:
                 if not p.is_file():
                     raise ValueError(
-                        f"thesis.export build needs processed/{rel}. Run model.evaluate/analysis.summarize first."
+                        f"thesis.export build needs {p.relative_to(proc)}. "
+                        "Run model.evaluate/analysis.summarize first."
                     )
                 if p.stat().st_size <= 0:
-                    raise ValueError(f"thesis.export build needs non-empty processed/{rel}.")
+                    raise ValueError(f"thesis.export build needs non-empty {p.relative_to(proc)}.")
+        return
+
+    if pipeline == "analysis.compare_runs":
+        if step_id == "build":
+            from mss.analysis.compare_config import build_compare_run_specs, load_compare_runs_config
+            from mss.analysis.compare_runs import require_compare_inputs
+            from mss.processed.paths import (
+                diagnostics_smoothing_path,
+                hypothesis_tests_path,
+                summary_table_path,
+            )
+
+            cr = load_compare_runs_config(cfg.source_config_path)
+            if not cr.comparison_id.strip():
+                raise ValueError(
+                    "analysis.compare_runs build needs [analysis.compare_runs].comparison_id "
+                    "in anchor config, or use CLI compare-runs with --comparison-id."
+                )
+            if not cr.peer_runs:
+                raise ValueError(
+                    "analysis.compare_runs build needs [analysis.compare_runs].peer_runs "
+                    "in anchor config, or use CLI compare-runs with --runs."
+                )
+            specs = build_compare_run_specs(
+                cfg.run_id,
+                cr.peer_runs,
+                configs_dir=cfg.source_config_path.parent,
+                label_overrides=cr.run_labels,
+            )
+            require_compare_inputs(specs)
+
+            req_by_run: list[tuple[str, Path]] = []
+            for spec in specs:
+                proc = Path(spec.cfg.processed_dir)
+                req_by_run.extend(
+                    [
+                        (spec.run_id, summary_table_path(spec.cfg)),
+                        (spec.run_id, diagnostics_smoothing_path(spec.cfg)),
+                        (spec.run_id, hypothesis_tests_path(spec.cfg)),
+                    ]
+                )
+            for run_id, p in req_by_run:
+                if not p.is_file():
+                    rel = p.relative_to(Path(specs[0].cfg.processed_dir).parent)
+                    raise ValueError(
+                        f"analysis.compare_runs build needs {rel} on run {run_id!r}. "
+                        "Run model.evaluate on each compared run first."
+                    )
+                if p.stat().st_size <= 0:
+                    raise ValueError(
+                        f"analysis.compare_runs build needs non-empty {p.name} on run {run_id!r}."
+                    )
         return
